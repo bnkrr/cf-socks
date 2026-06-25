@@ -1,12 +1,23 @@
+<div align="center">
+
 # cf-socks
 
-`cf-socks` runs a local SOCKS5 proxy backed by a Cloudflare Worker.
+Expose Cloudflare Workers' outbound TCP `connect()` capability to local clients.
+
+[![CI](https://github.com/bnkrr/cf-socks/actions/workflows/ci.yml/badge.svg)](https://github.com/bnkrr/cf-socks/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/bnkrr/cf-socks)](https://github.com/bnkrr/cf-socks/releases)
+[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8)](https://go.dev/)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020)](https://workers.cloudflare.com/)
+
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+</div>
 
 ```text
 application -> local SOCKS5 agent -> WSS -> Cloudflare Worker -> TCP target
 ```
 
-Use it when you want applications to connect through a local SOCKS5 endpoint while the outbound TCP connection is made from a Cloudflare Worker.
+It currently provides a local SOCKS5 endpoint because most applications already support SOCKS proxies, but the core design is the authenticated Worker TCP dialer.
 
 ## How It Works
 
@@ -148,3 +159,19 @@ Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variabl
 - Worker outbound TCP cannot connect to Cloudflare IP ranges.
 - SOCKS5 UDP ASSOCIATE and BIND are not implemented.
 - Each proxied TCP connection uses one WebSocket to the Worker.
+
+## Related Projects
+
+These projects overlap with parts of `cf-socks`, but use different product boundaries or data paths.
+
+| Project | Similarity | Difference |
+| --- | --- | --- |
+| [serverless-proxy](https://github.com/serverless-proxy/serverless-proxy) | Worker dials TCP targets. | Custom WebSocket/HTTP2 entrypoint, not local SOCKS5. |
+| [ClassicUO gate](https://github.com/ClassicUO/gate) | Worker bridges WebSocket to TCP. | Fixed game-server target, not a general dialer. |
+| [zizifn/edgetunnel](https://github.com/zizifn/edgetunnel) | Worker dials TCP targets. | VLESS-oriented proxy stack. |
+| [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel) | Worker dials TCP targets. | Broader edge proxy configuration ecosystem. |
+| [EDtunnel](https://github.com/6Kmfi6HP/EDtunnel) | Worker dials TCP targets. | Multi-protocol VLESS/Trojan/SOCKS-style proxy node. |
+| [linksocks](https://github.com/linksocks/linksocks) | SOCKS-over-WebSocket tunnel platform. | Worker mode is connector/provider relay oriented. |
+| [linksocks.js](https://github.com/linksocks/linksocks.js) | Runs on Cloudflare Workers. | Relays connector and provider peers instead of dialing targets directly. |
+| [socksflareprox](https://github.com/quippy-dev/socksflareprox) | Local SOCKS with Cloudflare in the path. | Uses Worker HTTP endpoints and a Python client. |
+| [cf-fetch-socks](https://github.com/oxcl/cf-fetch-socks) | Combines Workers and SOCKS concepts. | Worker uses an upstream SOCKS proxy; traffic direction is opposite. |

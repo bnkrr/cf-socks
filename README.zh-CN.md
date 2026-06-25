@@ -1,0 +1,177 @@
+<div align="center">
+
+# cf-socks
+
+把 Cloudflare Workers 的出站 TCP `connect()` 能力暴露给本地客户端使用。
+
+[![CI](https://github.com/bnkrr/cf-socks/actions/workflows/ci.yml/badge.svg)](https://github.com/bnkrr/cf-socks/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/bnkrr/cf-socks)](https://github.com/bnkrr/cf-socks/releases)
+[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8)](https://go.dev/)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020)](https://workers.cloudflare.com/)
+
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+</div>
+
+```text
+application -> local SOCKS5 agent -> WSS -> Cloudflare Worker -> TCP target
+```
+
+`cf-socks` 目前提供本地 SOCKS5 入口，因为多数应用已经支持 SOCKS 代理；核心设计是一个经过鉴权的 Worker TCP dialer。
+
+## 工作方式
+
+Cloudflare Workers 可以创建出站 TCP 连接，但不能监听入站原始 TCP。`cf-socks` 把 SOCKS5 服务保留在本机，并把 Worker 作为远端 TCP dialer 使用。
+
+每条被代理的 TCP 连接流程如下：
+
+1. 应用连接到本地 SOCKS5 agent。
+2. agent 通过安全 WebSocket 连接 Worker。
+3. Worker 鉴权 agent。
+4. Worker 连接请求的目标主机和端口。
+5. agent 和 Worker 双向转发字节流。
+
+HTTPS 由原始客户端在 SOCKS 隧道内处理。Worker 不终止、不检查目标 TLS 流量。
+
+## 环境要求
+
+- Go，用于构建和运行本地 agent。
+- 一个 Cloudflare 账号，用于部署 Worker。
+- 只有在使用 Wrangler 部署而不是复制 Worker 到 Cloudflare Dashboard 时，才需要 Node.js 和 npm。
+
+安装项目依赖：
+
+```bash
+go mod download
+```
+
+## 部署 Worker
+
+生成共享密钥：
+
+```bash
+export CF_SOCKS_AUTH_SECRET="$(openssl rand -hex 32)"
+```
+
+### 方式 A：Cloudflare Dashboard
+
+在 Cloudflare dashboard 中创建一个 Worker，把 [worker/single-file.js](worker/single-file.js) 复制到在线编辑器，并设置环境变量：
+
+```text
+AUTH_SECRET=<your generated secret>
+AUTH_WINDOW_SECONDS=120
+```
+
+然后在 dashboard 中部署 Worker。这个路径不需要本地安装 Node.js、npm 或 Wrangler。
+
+Dashboard 文件由 Wrangler 使用的同一份 Worker 源码生成，请不要手动编辑。修改 Worker 源码后，可用下面命令重新生成：
+
+```bash
+npm install
+npm run worker:bundle-dashboard
+```
+
+CI 会检查 [worker/single-file.js](worker/single-file.js) 是否和 `worker/src/` 保持同步。
+
+### 方式 B：Wrangler
+
+安装 Node 依赖：
+
+```bash
+npm install
+```
+
+快速临时部署：
+
+```bash
+npx wrangler deploy --temporary \
+  --var "AUTH_SECRET:$CF_SOCKS_AUTH_SECRET" \
+  --var "AUTH_WINDOW_SECONDS:120"
+```
+
+持久部署时，在 Cloudflare Worker 环境中配置相同的值，然后部署：
+
+```bash
+npx wrangler deploy
+```
+
+Worker WebSocket 入口地址为：
+
+```text
+wss://<your-worker-host>/tcp
+```
+
+## 运行 Agent
+
+从源码运行本地 SOCKS5 agent：
+
+```bash
+go run ./cmd/cf-socks-agent \
+  -listen 127.0.0.1:1080 \
+  -worker-url wss://<your-worker-host>/tcp \
+  -auth-secret "$CF_SOCKS_AUTH_SECRET"
+```
+
+或者构建本地二进制：
+
+```bash
+go build -o cf-socks-agent ./cmd/cf-socks-agent
+./cf-socks-agent \
+  -listen 127.0.0.1:1080 \
+  -worker-url wss://<your-worker-host>/tcp \
+  -auth-secret "$CF_SOCKS_AUTH_SECRET"
+```
+
+然后把应用配置为使用：
+
+```text
+socks5h://127.0.0.1:1080
+```
+
+## 验证
+
+通过代理测试 HTTP：
+
+```bash
+curl --socks5-hostname 127.0.0.1:1080 http://httpforever.com/
+```
+
+通过代理测试 HTTPS：
+
+```bash
+curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/
+```
+
+检查代理出口 IP：
+
+```bash
+curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
+```
+
+## 安全
+
+Worker 不是开放代理。本地 agent 必须先用共享密钥完成鉴权，Worker 才会打开任何出站 TCP 连接。
+
+不要提交真实密钥。请使用 Wrangler secrets、Cloudflare 环境变量或本地 shell 环境变量。
+
+## 限制
+
+- Worker 出站 TCP 不能连接到 Cloudflare IP 段。
+- 目前没有实现 SOCKS5 UDP ASSOCIATE 和 BIND。
+- 每条被代理的 TCP 连接都会使用一条到 Worker 的 WebSocket。
+
+## 相关项目
+
+这些项目和 `cf-socks` 的部分能力重叠，但产品边界或数据路径不同。
+
+| 项目 | 相似点 | 差异 |
+| --- | --- | --- |
+| [serverless-proxy](https://github.com/serverless-proxy/serverless-proxy) | Worker 直连 TCP 目标。 | 使用自定义 WebSocket/HTTP2 入口，不是本地 SOCKS5。 |
+| [ClassicUO gate](https://github.com/ClassicUO/gate) | Worker 桥接 WebSocket 和 TCP。 | 固定游戏服务器目标，不是通用 dialer。 |
+| [zizifn/edgetunnel](https://github.com/zizifn/edgetunnel) | Worker 直连 TCP 目标。 | 面向 VLESS 代理栈。 |
+| [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel) | Worker 直连 TCP 目标。 | 更偏完整边缘代理配置生态。 |
+| [EDtunnel](https://github.com/6Kmfi6HP/EDtunnel) | Worker 直连 TCP 目标。 | 多协议 VLESS/Trojan/SOCKS 风格代理节点。 |
+| [linksocks](https://github.com/linksocks/linksocks) | SOCKS-over-WebSocket 隧道平台。 | Worker 模式更偏 connector/provider 中继。 |
+| [linksocks.js](https://github.com/linksocks/linksocks.js) | 运行在 Cloudflare Workers 上。 | 中继 connector 和 provider，而不是 Worker 直接 dial 目标。 |
+| [socksflareprox](https://github.com/quippy-dev/socksflareprox) | 本地 SOCKS，路径中包含 Cloudflare。 | 使用 Worker HTTP 端点和 Python 客户端。 |
+| [cf-fetch-socks](https://github.com/oxcl/cf-fetch-socks) | 结合了 Workers 和 SOCKS 概念。 | Worker 使用上游 SOCKS 代理，流量方向相反。 |
