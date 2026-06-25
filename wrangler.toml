@@ -1,0 +1,7 @@
+name = "cf-socks"
+main = "worker/src/index.ts"
+compatibility_date = "2026-06-25"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+AUTH_WINDOW_SECONDS = "120"

@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Typecheck and Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Verify dashboard Worker bundle
+        run: |
+          npm run worker:bundle-dashboard
+          git diff --exit-code worker/single-file.js
+
+      - name: Typecheck Worker
+        run: npm run typecheck
+
+      - name: Test Worker code
+        run: npm test
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test Go code
+        run: go test ./...
+
+      - name: Build agent
+        run: go build -buildvcs=false ./cmd/cf-socks-agent
+
+  real-e2e:
+    name: Real E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'workflow_dispatch' && vars.RUN_REAL_E2E == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run real E2E
+        env:
+          E2E_WORKER_URL: ${{ secrets.E2E_WORKER_URL }}
+          E2E_AUTH_SECRET: ${{ secrets.E2E_AUTH_SECRET }}
+          E2E_HTTP_TARGET: ${{ vars.E2E_HTTP_TARGET }}
+          E2E_HTTPS_TARGET: ${{ vars.E2E_HTTPS_TARGET }}
+          E2E_TCP_BANNER_TARGET: ${{ vars.E2E_TCP_BANNER_TARGET }}
+        run: scripts/e2e-real.sh

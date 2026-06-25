@@ -1,0 +1,26 @@
+node_modules/
+.wrangler/
+.agents/
+.codex/
+.local/
+AGENTS.md
+dist/
+coverage/
+*.log
+tmp/
+.env
+.dev.vars
+/cf-socks-agent
+/bin/
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Go local outputs
+*.test
+*.out
+*.exe

@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Release Assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build dashboard Worker
+        run: npm run worker:bundle-dashboard
+
+      - name: Build agent
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          name="cf-socks-agent-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          go build -trimpath -buildvcs=false -ldflags="-s -w" -o "dist/${name}" ./cmd/cf-socks-agent
+
+      - name: Package agent
+        run: |
+          cd dist
+          asset="cf-socks-agent-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "${asset}.zip" "${asset}.exe"
+            rm "${asset}.exe"
+          else
+            tar -czf "${asset}.tar.gz" "${asset}"
+            rm "${asset}"
+          fi
+
+      - name: Include dashboard Worker once
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: cp worker/single-file.js dist/cf-socks-worker-dashboard.js
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true

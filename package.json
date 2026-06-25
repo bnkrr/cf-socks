@@ -1,0 +1,24 @@
+{
+  "name": "cf-socks",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker backed SOCKS5 relay",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e:real": "scripts/e2e-real.sh",
+    "worker:bundle-dashboard": "esbuild worker/src/index.ts --bundle --format=esm --platform=browser --target=es2022 --external:cloudflare:sockets --banner:js=\"// Generated from worker/src/index.ts. Do not edit by hand.\" --outfile=worker/single-file.js",
+    "worker:deploy:temporary": "wrangler deploy --temporary",
+    "worker:dev": "wrangler dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260625.1",
+    "esbuild": "^0.28.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9",
+    "wrangler": "^4.104.0"
+  }
+}
