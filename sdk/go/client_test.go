@@ -325,6 +325,89 @@ func TestClientDoPayloadThroughH2(t *testing.T) {
 	}
 }
 
+func TestClientDoPayloadThroughH3(t *testing.T) {
+	const secret = "test-secret"
+	client := h3TestClient(t, secret, "payload", "h3-response")
+
+	resp, err := client.Do(context.Background(), "tcp", "example.test:443", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "h3-response" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestClientDoH3NilPayloadReadsServerFirstResponse(t *testing.T) {
+	const secret = "test-secret"
+	client := h3TestClient(t, secret, "", "SSH-2.0-h3-test\r\n")
+
+	resp, err := client.Do(context.Background(), "tcp", "example.test:443", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "SSH-") {
+		t.Fatalf("line = %q", line)
+	}
+}
+
+func h3TestClient(t *testing.T, secret string, wantBody string, responseBody string) Client {
+	t.Helper()
+	roundTripper := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/h3" {
+			t.Fatalf("path = %q", req.URL.Path)
+		}
+		claims, err := token.Open(secret, token.AAD(req.Method, req.URL.Path), bearer(t, req), token.OpenOptions{Now: time.Now()})
+		if err != nil {
+			t.Fatalf("open token: %v", err)
+		}
+		if claims.Op != "payload" || claims.Host != "example.test" || claims.Port != 443 {
+			t.Fatalf("claims = %+v", claims)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != wantBody {
+			t.Fatalf("body = %q", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Proto:      "HTTP/3.0",
+			ProtoMajor: 3,
+			ProtoMinor: 0,
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	return Client{
+		Endpoint:   "https://worker.test",
+		Secret:     secret,
+		Transport:  TransportH3,
+		HTTPClient: &http.Client{Transport: roundTripper},
+	}
+}
+
+func TestClientDoH3RequiresHTTPClient(t *testing.T) {
+	client := Client{Endpoint: "https://worker.test", Secret: "secret", Transport: TransportH3}
+	if _, err := client.Do(context.Background(), "tcp", "example.test:443", nil); !errors.Is(err, ErrHTTPClientRequired) {
+		t.Fatalf("err = %v, want ErrHTTPClientRequired", err)
+	}
+}
+
 func TestClientDoRejectsNonHTTP2Response(t *testing.T) {
 	const secret = "test-secret"
 	worker := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +481,12 @@ func bearer(t *testing.T, r *http.Request) string {
 		t.Fatal("missing bearer token")
 	}
 	return value
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestSplitHostPort(t *testing.T) {

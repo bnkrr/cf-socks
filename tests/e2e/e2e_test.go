@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 
 	cfsocks "github.com/bnkrr/cf-socks/sdk/go"
 	"github.com/bnkrr/cf-socks/socksagent"
+	"github.com/quic-go/quic-go/http3"
 )
 
 func TestRealHTTPOverSocks(t *testing.T) {
@@ -150,6 +152,65 @@ func TestRealH2NilPayloadTCPBanner(t *testing.T) {
 		Endpoint:  os.Getenv("E2E_WORKER_URL"),
 		Secret:    os.Getenv("E2E_AUTH_SECRET"),
 		Transport: cfsocks.TransportH2,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.Do(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "SSH-") {
+		t.Fatalf("unexpected TCP banner %q", line)
+	}
+}
+
+func TestRealH3PayloadHTTP(t *testing.T) {
+	requireE2E(t)
+	host, port := target(t, "E2E_HTTP_TARGET", "httpforever.com:80")
+	preflightTarget(t, host, port)
+
+	transport := &http3.Transport{}
+	defer transport.Close()
+	client := cfsocks.Client{
+		Endpoint:   os.Getenv("E2E_WORKER_URL"),
+		Secret:     os.Getenv("E2E_AUTH_SECRET"),
+		Transport:  cfsocks.TransportH3,
+		HTTPClient: &http.Client{Transport: transport},
+	}
+	payload := strings.NewReader(fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.Do(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "HTTP/") {
+		t.Fatalf("unexpected HTTP status line %q", line)
+	}
+}
+
+func TestRealH3NilPayloadTCPBanner(t *testing.T) {
+	requireE2E(t)
+	host, port := target(t, "E2E_TCP_BANNER_TARGET", "github.com:22")
+	preflightTarget(t, host, port)
+
+	transport := &http3.Transport{}
+	defer transport.Close()
+	client := cfsocks.Client{
+		Endpoint:   os.Getenv("E2E_WORKER_URL"),
+		Secret:     os.Getenv("E2E_AUTH_SECRET"),
+		Transport:  cfsocks.TransportH3,
+		HTTPClient: &http.Client{Transport: transport},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -80,6 +80,51 @@ describe("worker endpoints", () => {
     expect(new TextDecoder().decode(written[0])).toBe("client-payload");
     expect(closed).not.toHaveBeenCalled();
   });
+
+  it("/h3 accepts payload with h3 token path", async () => {
+    const written: Uint8Array[] = [];
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("h3-target-response"));
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>({
+        write(chunk) {
+          written.push(chunk);
+        },
+      }),
+      close: vi.fn(),
+    });
+
+    const ctx = executionContext();
+    const auth = await bearer("secret", "POST", "/h3", {
+      op: "payload",
+      host: "example.test",
+      port: 443,
+      ts: Math.floor(Date.now() / 1000),
+    });
+    const response = await worker.fetch(
+      new Request("https://worker.test/h3", {
+        method: "POST",
+        headers: { authorization: auth },
+        body: "h3-client-payload",
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("h3-target-response");
+    await Promise.all(ctx.promises);
+    expect(mocks.connect).toHaveBeenCalledWith(
+      { hostname: "example.test", port: 443 },
+      { secureTransport: "off", allowHalfOpen: true },
+    );
+    expect(new TextDecoder().decode(written[0])).toBe("h3-client-payload");
+  });
 });
 
 function env() {

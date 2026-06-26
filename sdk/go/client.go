@@ -23,6 +23,7 @@ type Transport string
 const (
 	TransportWSS Transport = "wss"
 	TransportH2  Transport = "h2"
+	TransportH3  Transport = "h3"
 )
 
 type Client struct {
@@ -42,6 +43,7 @@ var (
 	ErrUnsupportedNetwork   = errors.New("unsupported network")
 	ErrWorkerRejected       = errors.New("worker rejected request")
 	ErrUnexpectedProtocol   = errors.New("unexpected protocol")
+	ErrHTTPClientRequired   = errors.New("http client is required")
 )
 
 func (c *Client) Dial(ctx context.Context, network, address string) (net.Conn, error) {
@@ -86,7 +88,8 @@ func (c *Client) Dial(ctx context.Context, network, address string) (net.Conn, e
 }
 
 func (c *Client) Do(ctx context.Context, network, address string, payload io.Reader) (*Response, error) {
-	if c.transport() != TransportH2 {
+	transport := c.transport()
+	if transport != TransportH2 && transport != TransportH3 {
 		return nil, ErrUnsupportedTransport
 	}
 	if network != "tcp" {
@@ -96,11 +99,17 @@ func (c *Client) Do(ctx context.Context, network, address string, payload io.Rea
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := c.endpoint("/h2", false)
+	path := "/h2"
+	expectedProtoMajor := 2
+	if transport == TransportH3 {
+		path = "/h3"
+		expectedProtoMajor = 3
+	}
+	endpoint, err := c.endpoint(path, false)
 	if err != nil {
 		return nil, err
 	}
-	auth, err := c.authHeader("POST", "/h2", token.Claims{Op: "payload", Host: host, Port: port})
+	auth, err := c.authHeader("POST", path, token.Claims{Op: "payload", Host: host, Port: port})
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +124,9 @@ func (c *Client) Do(ctx context.Context, network, address string, payload io.Rea
 	req.Header.Set("Content-Type", "application/octet-stream")
 	client := c.HTTPClient
 	if client == nil {
+		if transport == TransportH3 {
+			return nil, ErrHTTPClientRequired
+		}
 		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
@@ -125,9 +137,9 @@ func (c *Client) Do(ctx context.Context, network, address string, payload io.Rea
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%w: status %d", ErrWorkerRejected, resp.StatusCode)
 	}
-	if resp.ProtoMajor != 2 {
+	if resp.ProtoMajor != expectedProtoMajor {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("%w: expected HTTP/2, got %s", ErrUnexpectedProtocol, resp.Proto)
+		return nil, fmt.Errorf("%w: expected HTTP/%d, got %s", ErrUnexpectedProtocol, expectedProtoMajor, resp.Proto)
 	}
 	return &Response{Body: resp.Body, StatusCode: resp.StatusCode}, nil
 }

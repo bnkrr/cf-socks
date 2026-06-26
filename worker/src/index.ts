@@ -14,8 +14,8 @@ export default {
     if (url.pathname === "/wss") {
       return handleWSS(request, env, ctx);
     }
-    if (url.pathname === "/h2") {
-      return handleH2(request, env, ctx);
+    if (url.pathname === "/h2" || url.pathname === "/h3") {
+      return handlePayload(request, env, ctx);
     }
     return notFound();
   },
@@ -38,7 +38,7 @@ async function handleWSS(request: Request, env: Env, ctx: ExecutionContext): Pro
   return new Response(null, { status: 101, webSocket: client });
 }
 
-async function handleH2(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function handlePayload(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (request.method !== "POST") {
     return notFound();
   }
@@ -189,6 +189,8 @@ async function pipeRequestToSocket(request: Request, socket: ReturnType<typeof c
       }
     }
   } finally {
+    // Do not close socket.writable here. On Workers connect(), closing the writable side
+    // also ends the readable response path in practice, which breaks Do response streaming.
     writer.releaseLock();
     reader.releaseLock();
   }

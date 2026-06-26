@@ -17,7 +17,7 @@ Expose Cloudflare Workers' outbound TCP `connect()` capability to local clients.
 application -> local SOCKS5 agent -> WSS Dial -> Cloudflare Worker -> TCP target
 ```
 
-It currently provides a local SOCKS5 endpoint because most applications already support SOCKS proxies. It also exposes a Go SDK with WSS `Dial` for interactive TCP and H2 `Do` for bounded payload exchanges.
+It currently provides a local SOCKS5 endpoint because most applications already support SOCKS proxies. It also exposes a Go SDK with WSS `Dial` for interactive TCP and H2/H3 `Do` for bounded payload exchanges.
 
 ## How It Works
 
@@ -33,13 +33,13 @@ For each proxied TCP connection:
 
 HTTPS is handled by the original client inside the SOCKS tunnel. The Worker does not terminate or inspect target TLS traffic.
 
-For custom clients, `Client.Do` uses HTTP/2 for bounded payloads:
+For custom clients, `Client.Do` uses HTTP/2 or HTTP/3 for bounded payloads:
 
 ```text
-payload -> H2 POST -> Cloudflare Worker -> TCP target -> response body
+payload -> H2/H3 POST -> Cloudflare Worker -> TCP target -> response body
 ```
 
-H2 mode is useful for many short client-first exchanges, but it is not a `net.Conn` transport. A single H2 request stream is not a reliable open-ended full-duplex TCP tunnel, so interactive connections use WSS.
+H2/H3 mode is useful for many short client-first exchanges, but it is not a `net.Conn` transport. A single HTTP request stream is not a reliable open-ended full-duplex TCP tunnel on Workers, so interactive connections use WSS.
 
 ## Requirements
 
@@ -190,7 +190,31 @@ resp, err := client.Do(ctx, "tcp", "httpforever.com:80", strings.NewReader(
 ))
 ```
 
-`Do(ctx, "tcp", "github.com:22", nil)` sends an empty payload and can read server-first banners such as SSH. It is still not an interactive connection.
+Use H3 `Do` as a QUIC-based alternative for the same bounded-payload pattern:
+
+```go
+import (
+    "net/http"
+
+    cfsocks "github.com/bnkrr/cf-socks/sdk/go"
+    "github.com/quic-go/quic-go/http3"
+)
+
+transport := &http3.Transport{}
+defer transport.Close()
+
+client := cfsocks.Client{
+    Endpoint:   "https://<your-worker-host>",
+    Secret:     os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Transport:  cfsocks.TransportH3,
+    HTTPClient: &http.Client{Transport: transport},
+}
+resp, err := client.Do(ctx, "tcp", "httpforever.com:80", strings.NewReader(
+    "GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n",
+))
+```
+
+`Do(ctx, "tcp", "github.com:22", nil)` sends an empty payload and can read server-first banners such as SSH with either H2 or H3. It is still not an interactive connection. `Do` also does not signal target-side TCP EOF after sending the payload; use it for targets that can respond from the supplied bytes or speak first.
 
 WSS `Dial` returns a `net.Conn`. Read deadlines are recoverable local wait timeouts. Write deadlines are checked before a WebSocket message write begins; once a write has started, use `Close()` to abandon the connection. Closing WSS also closes the Worker-side target TCP connection, so the same TCP session cannot be resumed by reconnecting.
 
@@ -205,7 +229,7 @@ Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variabl
 - Worker outbound TCP cannot connect to Cloudflare IP ranges.
 - SOCKS5 UDP ASSOCIATE and BIND are not implemented.
 - Each proxied TCP connection uses one WebSocket to the Worker.
-- H2 mode is bounded-payload only; it is not a SOCKS or `net.Conn` transport.
+- H2/H3 mode is bounded-payload only; it is not a SOCKS or `net.Conn` transport, and it does not provide target-side TCP half-close/EOF signaling.
 
 ## Related Projects
 

@@ -1,6 +1,6 @@
 {
   "name": "cf-socks",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Cloudflare Worker backed SOCKS5 relay",
   "scripts": {
     "typecheck": "tsc --noEmit",

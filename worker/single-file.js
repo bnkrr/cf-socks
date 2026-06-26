@@ -147,8 +147,8 @@ var index_default = {
     if (url.pathname === "/wss") {
       return handleWSS(request, env, ctx);
     }
-    if (url.pathname === "/h2") {
-      return handleH2(request, env, ctx);
+    if (url.pathname === "/h2" || url.pathname === "/h3") {
+      return handlePayload(request, env, ctx);
     }
     return notFound();
   }
@@ -168,7 +168,7 @@ async function handleWSS(request, env, ctx) {
   ctx.waitUntil(handleTunnel(server, claims.host, claims.port));
   return new Response(null, { status: 101, webSocket: client });
 }
-async function handleH2(request, env, ctx) {
+async function handlePayload(request, env, ctx) {
   if (request.method !== "POST") {
     return notFound();
   }
