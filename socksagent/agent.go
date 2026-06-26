@@ -1,27 +1,26 @@
-package agent
+package socksagent
 
 import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
-	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
-	"github.com/bnkrr/cf-socks/internal/handshake"
-	"nhooyr.io/websocket"
+	cfsocks "github.com/bnkrr/cf-socks/sdk/go"
 )
 
 type Config struct {
-	WorkerURL       string
-	AuthSecret      string
-	DialTimeout     time.Duration
-	IdleTimeout     time.Duration
-	AllowInsecureWS bool
+	WorkerURL   string
+	AuthSecret  string
+	DialTimeout time.Duration
+	IdleTimeout time.Duration
+	HTTPClient  *http.Client
 }
 
 func (c Config) withDefaults() Config {
@@ -41,9 +40,6 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 	}
 	if cfg.AuthSecret == "" {
 		return errors.New("auth secret is required")
-	}
-	if err := validateWorkerURL(cfg.WorkerURL, cfg.AllowInsecureWS); err != nil {
-		return err
 	}
 
 	errc := make(chan error, 1)
@@ -71,24 +67,6 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 	return err
 }
 
-func validateWorkerURL(rawURL string, allowInsecure bool) error {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return err
-	}
-	switch parsed.Scheme {
-	case "wss":
-		return nil
-	case "ws":
-		if allowInsecure {
-			return nil
-		}
-		return errors.New("worker URL must use wss://")
-	default:
-		return errors.New("worker URL must use wss://")
-	}
-}
-
 func handleClient(parent context.Context, client net.Conn, cfg Config) error {
 	defer client.Close()
 	target, err := negotiate(client)
@@ -99,52 +77,49 @@ func handleClient(parent context.Context, client net.Conn, cfg Config) error {
 	dialCtx, cancel := context.WithTimeout(parent, cfg.DialTimeout)
 	defer cancel()
 
-	ws, _, err := websocket.Dial(dialCtx, cfg.WorkerURL, nil)
+	remote, err := (&cfsocks.Client{
+		Endpoint:   cfg.WorkerURL,
+		Secret:     cfg.AuthSecret,
+		Transport:  cfsocks.TransportWSS,
+		HTTPClient: cfg.HTTPClient,
+	}).Dial(dialCtx, "tcp", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)))
 	if err != nil {
 		_ = writeReply(client, 0x01)
 		return err
 	}
-	defer ws.Close(websocket.StatusNormalClosure, "")
-
-	req, err := handshake.New(cfg.AuthSecret, target.Host, target.Port, time.Now())
-	if err != nil {
-		_ = writeReply(client, 0x01)
-		return err
-	}
-	payload, err := handshake.Marshal(req)
-	if err != nil {
-		_ = writeReply(client, 0x01)
-		return err
-	}
-	if err := ws.Write(dialCtx, websocket.MessageText, payload); err != nil {
-		_ = writeReply(client, 0x01)
-		return err
-	}
-
-	typ, data, err := ws.Read(dialCtx)
-	if err != nil {
-		_ = writeReply(client, 0x01)
-		return err
-	}
-	if typ != websocket.MessageText || string(data) != "OK\n" {
-		_ = writeReply(client, 0x05)
-		return fmt.Errorf("worker rejected target %s:%d: %q", target.Host, target.Port, string(data))
-	}
+	defer remote.Close()
 	if err := writeReply(client, 0x00); err != nil {
 		return err
 	}
 
 	relayCtx, stop := context.WithCancel(parent)
 	defer stop()
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = client.Close()
+			_ = remote.Close()
+		})
+	}
+	var activity chan struct{}
+	if cfg.IdleTimeout > 0 {
+		activity = make(chan struct{}, 1)
+		go monitorIdle(relayCtx, cfg.IdleTimeout, activity, func() {
+			stop()
+			closeBoth()
+		})
+	}
 	errc := make(chan error, 2)
 	go func() {
-		errc <- relayClientToWorker(relayCtx, client, ws)
+		errc <- relay(relayCtx, remote, client, activity)
 	}()
 	go func() {
-		errc <- relayWorkerToClient(relayCtx, ws, client)
+		errc <- relay(relayCtx, client, remote, activity)
 	}()
 	err = <-errc
 	stop()
+	closeBoth()
+	<-errc
 	return err
 }
 
@@ -232,41 +207,80 @@ func writeReply(w io.Writer, rep byte) error {
 	return err
 }
 
-func relayClientToWorker(ctx context.Context, client net.Conn, ws *websocket.Conn) error {
+func relay(ctx context.Context, dst net.Conn, src net.Conn, activity chan<- struct{}) error {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = src.SetReadDeadline(time.Now())
+		case <-done:
+		}
+	}()
+	defer close(done)
+
 	buf := make([]byte, 32*1024)
 	for {
-		_ = client.SetReadDeadline(time.Now().Add(5 * time.Minute))
-		n, err := client.Read(buf)
+		n, readErr := src.Read(buf)
 		if n > 0 {
-			writeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			werr := ws.Write(writeCtx, websocket.MessageBinary, buf[:n])
-			cancel()
-			if werr != nil {
-				return werr
+			if err := writeAll(dst, buf[:n]); err != nil {
+				return err
 			}
+			notifyActivity(activity)
 		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				_ = ws.Close(websocket.StatusNormalClosure, "")
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
 				return nil
 			}
-			return err
+			return readErr
 		}
 	}
 }
 
-func relayWorkerToClient(ctx context.Context, ws *websocket.Conn, client net.Conn) error {
-	for {
-		typ, data, err := ws.Read(ctx)
+func writeAll(dst net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := dst.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
 		if err != nil {
 			return err
 		}
-		if typ != websocket.MessageBinary {
-			continue
+		if n == 0 {
+			return io.ErrShortWrite
 		}
-		if _, err := client.Write(data); err != nil {
-			return err
+	}
+	return nil
+}
+
+func monitorIdle(ctx context.Context, timeout time.Duration, activity <-chan struct{}, onIdle func()) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-activity:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(timeout)
+		case <-timer.C:
+			onIdle()
+			return
 		}
+	}
+}
+
+func notifyActivity(activity chan<- struct{}) {
+	if activity == nil {
+		return
+	}
+	select {
+	case activity <- struct{}{}:
+	default:
 	}
 }
 
@@ -280,16 +294,5 @@ func contains(values []byte, needle byte) bool {
 }
 
 func SplitHostPort(value string) (string, int, error) {
-	host, portText, err := net.SplitHostPort(value)
-	if err != nil {
-		return "", 0, err
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		return "", 0, err
-	}
-	if port < 1 || port > 65535 {
-		return "", 0, fmt.Errorf("invalid port %d", port)
-	}
-	return host, port, nil
+	return cfsocks.SplitHostPort(value)
 }

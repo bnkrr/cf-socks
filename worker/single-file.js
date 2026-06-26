@@ -3,8 +3,10 @@
 // worker/src/index.ts
 import { connect } from "cloudflare:sockets";
 
-// worker/src/auth.ts
-var HANDSHAKE_PREFIX = "cf-socks-v1";
+// worker/src/token.ts
+var VERSION = 2;
+var KEY_PREFIX = "cf-socks auth v2\n";
+var DEFAULT_WINDOW_SECONDS = 120;
 var NonceCache = class {
   constructor(maxEntries = 4096) {
     this.maxEntries = maxEntries;
@@ -33,10 +35,59 @@ var NonceCache = class {
     }
   }
 };
-function parseHandshake(input) {
-  if (typeof input !== "string") {
+async function verifyBearerToken(header, options) {
+  const encoded = bearerToken(header);
+  if (!encoded) {
     return null;
   }
+  const raw = base64UrlDecode(encoded);
+  if (!raw || raw.byteLength < 1 + 12 + 16 || raw[0] !== VERSION) {
+    return null;
+  }
+  const nonce = raw.slice(1, 13);
+  const ciphertext = raw.slice(13);
+  let plaintext;
+  try {
+    const key = await aesKey(options.secret);
+    plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(nonce),
+        additionalData: new TextEncoder().encode(`${options.method}
+${options.path}`)
+      },
+      key,
+      toArrayBuffer(ciphertext)
+    );
+  } catch {
+    return null;
+  }
+  const claims = parseClaims(new TextDecoder().decode(plaintext));
+  if (!claims || claims.op !== options.expectedOp) {
+    return null;
+  }
+  const windowSeconds = options.windowSeconds ?? DEFAULT_WINDOW_SECONDS;
+  const now = options.nowSeconds ?? Math.floor(Date.now() / 1e3);
+  if (Math.abs(now - claims.ts) > windowSeconds) {
+    return null;
+  }
+  if (options.nonceCache) {
+    const nonceKey = base64UrlEncode(nonce);
+    if (!options.nonceCache.consume(nonceKey, claims.ts + windowSeconds, now)) {
+      return null;
+    }
+  }
+  return claims;
+}
+function bearerToken(header) {
+  const prefix = "Bearer ";
+  if (!header?.startsWith(prefix)) {
+    return null;
+  }
+  const value = header.slice(prefix.length);
+  return value.length > 0 ? value : null;
+}
+function parseClaims(input) {
   let value;
   try {
     value = JSON.parse(input);
@@ -47,67 +98,22 @@ function parseHandshake(input) {
     return null;
   }
   const candidate = value;
-  if (candidate.v !== 1 || typeof candidate.host !== "string" || !isValidHost(candidate.host) || typeof candidate.port !== "number" || !Number.isInteger(candidate.port) || candidate.port < 1 || candidate.port > 65535 || typeof candidate.ts !== "number" || !Number.isInteger(candidate.ts) || typeof candidate.nonce !== "string" || !isReasonableToken(candidate.nonce) || typeof candidate.mac !== "string" || !isReasonableToken(candidate.mac)) {
+  if (candidate.op !== "dial" && candidate.op !== "payload" || typeof candidate.host !== "string" || !isValidHost(candidate.host) || typeof candidate.port !== "number" || !Number.isInteger(candidate.port) || candidate.port < 1 || candidate.port > 65535 || typeof candidate.ts !== "number" || !Number.isInteger(candidate.ts)) {
     return null;
   }
   return {
-    v: 1,
+    op: candidate.op,
     host: candidate.host,
     port: candidate.port,
-    ts: candidate.ts,
-    nonce: candidate.nonce,
-    mac: candidate.mac
+    ts: candidate.ts
   };
 }
-function handshakeMessage(handshake) {
-  return `${HANDSHAKE_PREFIX}
-${handshake.host}
-${handshake.port}
-${handshake.ts}
-${handshake.nonce}`;
-}
-async function verifyHandshake(handshake, options) {
-  const windowSeconds = options.windowSeconds ?? 120;
-  const now = options.nowSeconds ?? Math.floor(Date.now() / 1e3);
-  if (Math.abs(now - handshake.ts) > windowSeconds) {
-    return false;
-  }
-  const actual = base64UrlDecode(handshake.mac);
-  if (!actual) {
-    return false;
-  }
-  const key = await hmacKey(options.secret, ["verify"]);
-  const verified = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    toArrayBuffer(actual),
-    new TextEncoder().encode(handshakeMessage(handshake))
-  );
-  if (!verified) {
-    return false;
-  }
-  if (options.nonceCache && !options.nonceCache.consume(handshake.nonce, handshake.ts + windowSeconds, now)) {
-    return false;
-  }
-  return true;
-}
 function isValidHost(host) {
-  if (host.length < 1 || host.length > 253 || host.includes("\n") || host.includes("\r")) {
-    return false;
-  }
-  return /^[A-Za-z0-9._:-]+$/.test(host);
+  return host.length > 0 && host.length <= 253 && !host.includes("\n") && !host.includes("\r");
 }
-function isReasonableToken(value) {
-  return value.length >= 8 && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value);
-}
-async function hmacKey(secret, usages) {
-  return crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    usages
-  );
+async function aesKey(secret) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(KEY_PREFIX + secret));
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["decrypt"]);
 }
 function base64UrlDecode(value) {
   try {
@@ -122,6 +128,13 @@ function base64UrlDecode(value) {
     return null;
   }
 }
+function base64UrlEncode(bytes) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
 function toArrayBuffer(bytes) {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
@@ -131,40 +144,76 @@ var nonceCache = new NonceCache();
 var index_default = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (url.pathname !== "/tcp") {
-      return new Response("not found\n", { status: 404 });
+    if (url.pathname === "/wss") {
+      return handleWSS(request, env, ctx);
     }
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return new Response("upgrade required\n", { status: 426 });
+    if (url.pathname === "/h2") {
+      return handleH2(request, env, ctx);
     }
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
-    server.binaryType = "arraybuffer";
-    ctx.waitUntil(handleTunnel(server, env));
-    return new Response(null, { status: 101, webSocket: client });
+    return notFound();
   }
 };
-async function handleTunnel(ws, env) {
-  const secret = env.AUTH_SECRET;
-  if (!secret) {
-    ws.close(1008);
-    return;
+async function handleWSS(request, env, ctx) {
+  const claims = await verifyRequest(request, env, "dial");
+  if (!claims) {
+    return notFound();
   }
-  const first = await readFirstMessage(ws, 1e4);
-  const handshake = parseHandshake(first);
-  const ok = handshake !== null && await verifyHandshake(handshake, {
-    secret,
-    windowSeconds: parseWindowSeconds(env.AUTH_WINDOW_SECONDS),
-    nonceCache
-  });
-  if (!ok || handshake === null) {
-    ws.close(1008);
-    return;
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("upgrade required\n", { status: 426 });
+  }
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
+  server.binaryType = "arraybuffer";
+  ctx.waitUntil(handleTunnel(server, claims.host, claims.port));
+  return new Response(null, { status: 101, webSocket: client });
+}
+async function handleH2(request, env, ctx) {
+  if (request.method !== "POST") {
+    return notFound();
+  }
+  const claims = await verifyRequest(request, env, "payload");
+  if (!claims) {
+    return notFound();
   }
   let socket;
   try {
-    socket = connect({ hostname: handshake.host, port: handshake.port });
+    socket = connect({ hostname: claims.host, port: claims.port }, { secureTransport: "off", allowHalfOpen: true });
+    await socket.opened;
+  } catch {
+    return new Response(null, { status: 502 });
+  }
+  ctx.waitUntil(
+    pipeRequestToSocket(request, socket).catch(() => {
+      void socket.close().catch(() => void 0);
+    })
+  );
+  return new Response(socket.readable, {
+    status: 200,
+    headers: {
+      "content-type": "application/octet-stream",
+      "cache-control": "no-store"
+    }
+  });
+}
+async function verifyRequest(request, env, expectedOp) {
+  if (!env.AUTH_SECRET) {
+    return null;
+  }
+  const url = new URL(request.url);
+  return verifyBearerToken(request.headers.get("Authorization"), {
+    secret: env.AUTH_SECRET,
+    method: request.method,
+    path: url.pathname,
+    expectedOp,
+    windowSeconds: parseWindowSeconds(env.AUTH_WINDOW_SECONDS),
+    nonceCache
+  });
+}
+async function handleTunnel(ws, host, port) {
+  let socket;
+  try {
+    socket = connect({ hostname: host, port });
     await socket.opened;
   } catch {
     safeSend(ws, "ERR connect_failed\n");
@@ -174,31 +223,6 @@ async function handleTunnel(ws, env) {
   const relayDone = relay(ws, socket);
   safeSend(ws, "OK\n");
   await relayDone;
-}
-function readFirstMessage(ws, timeoutMs) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve(null);
-    }, timeoutMs);
-    const onMessage = (event) => {
-      cleanup();
-      resolve(event.data);
-    };
-    const onClose = () => {
-      cleanup();
-      resolve(null);
-    };
-    const cleanup = () => {
-      clearTimeout(timer);
-      ws.removeEventListener("message", onMessage);
-      ws.removeEventListener("close", onClose);
-      ws.removeEventListener("error", onClose);
-    };
-    ws.addEventListener("message", onMessage);
-    ws.addEventListener("close", onClose);
-    ws.addEventListener("error", onClose);
-  });
 }
 async function relay(ws, socket) {
   const writer = socket.writable.getWriter();
@@ -264,6 +288,30 @@ function parseWindowSeconds(value) {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 120;
+}
+async function pipeRequestToSocket(request, socket) {
+  if (!request.body) {
+    return;
+  }
+  const reader = request.body.getReader();
+  const writer = socket.writable.getWriter();
+  try {
+    for (; ; ) {
+      const { value, done } = await reader.read();
+      if (done) {
+        return;
+      }
+      if (value) {
+        await writer.write(value);
+      }
+    }
+  } finally {
+    writer.releaseLock();
+    reader.releaseLock();
+  }
+}
+function notFound() {
+  return new Response(null, { status: 404 });
 }
 function safeSend(ws, data) {
   try {

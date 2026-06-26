@@ -13,9 +13,9 @@ fi
 if [ -z "${E2E_WORKER_URL:-}" ]; then
   log=/tmp/cf-socks-deploy.log
   if [ -f "$log" ]; then
-    url="$(sed -n 's#.*https://#https://#p' "$log" | tail -n 1 | tr -d '[:space:]')"
+    url="$(sed -n 's#.*https://#https://#p' "$log" | grep -E '^https://[^[:space:]]+\.workers\.dev$' | tail -n 1 | tr -d '[:space:]')"
     if [ -n "$url" ]; then
-      export E2E_WORKER_URL="${url/https:/wss:}/tcp"
+      export E2E_WORKER_URL="$url"
     fi
   fi
 fi

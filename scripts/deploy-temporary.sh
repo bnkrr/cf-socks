@@ -20,8 +20,8 @@ npx wrangler deploy --temporary \
   --var "AUTH_SECRET:$secret" \
   --var "AUTH_WINDOW_SECONDS:${AUTH_WINDOW_SECONDS:-120}" 2>&1 | tee "$log"
 
-url="$(sed -n 's#.*https://#https://#p' "$log" | tail -n 1 | tr -d '[:space:]')"
+url="$(sed -n 's#.*https://#https://#p' "$log" | grep -E '^https://[^[:space:]]+\.workers\.dev$' | tail -n 1 | tr -d '[:space:]')"
 if [ -n "$url" ]; then
-  echo "E2E_WORKER_URL=${url/https:/wss:}/tcp"
+  echo "E2E_WORKER_URL=$url"
 fi
 echo "E2E_AUTH_SECRET_FILE=/tmp/cf-socks-e2e-secret"

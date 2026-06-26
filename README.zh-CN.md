@@ -14,10 +14,10 @@
 </div>
 
 ```text
-application -> local SOCKS5 agent -> WSS -> Cloudflare Worker -> TCP target
+application -> local SOCKS5 agent -> WSS Dial -> Cloudflare Worker -> TCP target
 ```
 
-`cf-socks` 目前提供本地 SOCKS5 入口，因为多数应用已经支持 SOCKS 代理；核心设计是一个经过鉴权的 Worker TCP dialer。
+`cf-socks` 目前提供本地 SOCKS5 入口，因为多数应用已经支持 SOCKS 代理；同时提供 Go SDK：WSS `Dial` 用于交互式 TCP，H2 `Do` 用于有边界的 payload 交换。
 
 ## 工作方式
 
@@ -26,12 +26,20 @@ Cloudflare Workers 可以创建出站 TCP 连接，但不能监听入站原始 T
 每条被代理的 TCP 连接流程如下：
 
 1. 应用连接到本地 SOCKS5 agent。
-2. agent 通过安全 WebSocket 连接 Worker。
-3. Worker 鉴权 agent。
+2. agent 带加密 bearer token 通过安全 WebSocket 连接 Worker。
+3. Worker 在接受 WebSocket upgrade 前完成鉴权。
 4. Worker 连接请求的目标主机和端口。
 5. agent 和 Worker 双向转发字节流。
 
 HTTPS 由原始客户端在 SOCKS 隧道内处理。Worker 不终止、不检查目标 TLS 流量。
+
+自定义客户端可以使用 `Client.Do` 走 HTTP/2 bounded payload：
+
+```text
+payload -> H2 POST -> Cloudflare Worker -> TCP target -> response body
+```
+
+H2 模式适合大量短的 client-first 交换，但它不是 `net.Conn` transport。单条 H2 request stream 不能可靠承载长期打开的全双工 TCP tunnel，因此交互式连接仍使用 WSS。
 
 ## 环境要求
 
@@ -95,10 +103,10 @@ npx wrangler deploy --temporary \
 npx wrangler deploy
 ```
 
-Worker WebSocket 入口地址为：
+Worker endpoint 使用 base URL：
 
 ```text
-wss://<your-worker-host>/tcp
+https://<your-worker-host>
 ```
 
 ## 运行 Agent
@@ -108,7 +116,7 @@ wss://<your-worker-host>/tcp
 ```bash
 go run ./cmd/cf-socks-agent \
   -listen 127.0.0.1:1080 \
-  -worker-url wss://<your-worker-host>/tcp \
+  -worker-url https://<your-worker-host> \
   -auth-secret "$CF_SOCKS_AUTH_SECRET"
 ```
 
@@ -118,7 +126,7 @@ go run ./cmd/cf-socks-agent \
 go build -o cf-socks-agent ./cmd/cf-socks-agent
 ./cf-socks-agent \
   -listen 127.0.0.1:1080 \
-  -worker-url wss://<your-worker-host>/tcp \
+  -worker-url https://<your-worker-host> \
   -auth-secret "$CF_SOCKS_AUTH_SECRET"
 ```
 
@@ -127,6 +135,8 @@ go build -o cf-socks-agent ./cmd/cf-socks-agent
 ```text
 socks5h://127.0.0.1:1080
 ```
+
+agent 默认会在连接空闲 5 分钟后关闭代理连接。使用 `-idle-timeout -1` 可以禁用 idle timeout。
 
 ## 验证
 
@@ -148,9 +158,45 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
 ```
 
+## Go SDK
+
+Go client SDK 的 import path 是 `github.com/bnkrr/cf-socks/sdk/go`。
+
+需要交互式 TCP 流时使用 WSS `Dial`：
+
+```go
+import cfsocks "github.com/bnkrr/cf-socks/sdk/go"
+
+client := cfsocks.Client{
+    Endpoint:  "https://<your-worker-host>",
+    Secret:    os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Transport: cfsocks.TransportWSS,
+}
+conn, err := client.Dial(ctx, "tcp", "httpforever.com:80")
+```
+
+已有完整 payload 时使用 H2 `Do`：
+
+```go
+import cfsocks "github.com/bnkrr/cf-socks/sdk/go"
+
+client := cfsocks.Client{
+    Endpoint:  "https://<your-worker-host>",
+    Secret:    os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Transport: cfsocks.TransportH2,
+}
+resp, err := client.Do(ctx, "tcp", "httpforever.com:80", strings.NewReader(
+    "GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n",
+))
+```
+
+`Do(ctx, "tcp", "github.com:22", nil)` 会发送空 payload，可读取 SSH 这类 server-first banner；但它仍然不是交互式连接。
+
+WSS `Dial` 返回 `net.Conn`。读 deadline 是可恢复的本地等待超时；写 deadline 只会在 WebSocket message 开始写入前生效，一旦写入已经开始，如需放弃连接请调用 `Close()`。关闭 WSS 也会关闭 Worker 侧的目标 TCP 连接，重连不能恢复同一个 TCP session。
+
 ## 安全
 
-Worker 不是开放代理。本地 agent 必须先用共享密钥完成鉴权，Worker 才会打开任何出站 TCP 连接。
+Worker 不是开放代理。客户端必须先使用从 `AUTH_SECRET` 派生的加密 bearer token 完成鉴权，Worker 才会打开任何出站 TCP 连接。
 
 不要提交真实密钥。请使用 Wrangler secrets、Cloudflare 环境变量或本地 shell 环境变量。
 
@@ -159,6 +205,7 @@ Worker 不是开放代理。本地 agent 必须先用共享密钥完成鉴权，
 - Worker 出站 TCP 不能连接到 Cloudflare IP 段。
 - 目前没有实现 SOCKS5 UDP ASSOCIATE 和 BIND。
 - 每条被代理的 TCP 连接都会使用一条到 Worker 的 WebSocket。
+- H2 模式只支持 bounded payload；它不是 SOCKS 或 `net.Conn` transport。
 
 ## 相关项目
 

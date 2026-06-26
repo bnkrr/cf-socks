@@ -14,10 +14,10 @@ Expose Cloudflare Workers' outbound TCP `connect()` capability to local clients.
 </div>
 
 ```text
-application -> local SOCKS5 agent -> WSS -> Cloudflare Worker -> TCP target
+application -> local SOCKS5 agent -> WSS Dial -> Cloudflare Worker -> TCP target
 ```
 
-It currently provides a local SOCKS5 endpoint because most applications already support SOCKS proxies, but the core design is the authenticated Worker TCP dialer.
+It currently provides a local SOCKS5 endpoint because most applications already support SOCKS proxies. It also exposes a Go SDK with WSS `Dial` for interactive TCP and H2 `Do` for bounded payload exchanges.
 
 ## How It Works
 
@@ -26,12 +26,20 @@ Cloudflare Workers can create outbound TCP connections, but they cannot listen f
 For each proxied TCP connection:
 
 1. The application connects to the local SOCKS5 agent.
-2. The agent opens a secure WebSocket to the Worker.
-3. The Worker authenticates the agent.
+2. The agent opens a secure WebSocket to the Worker with an encrypted bearer token.
+3. The Worker authenticates before accepting the WebSocket upgrade.
 4. The Worker connects to the requested target host and port.
 5. The agent and Worker relay bytes in both directions.
 
 HTTPS is handled by the original client inside the SOCKS tunnel. The Worker does not terminate or inspect target TLS traffic.
+
+For custom clients, `Client.Do` uses HTTP/2 for bounded payloads:
+
+```text
+payload -> H2 POST -> Cloudflare Worker -> TCP target -> response body
+```
+
+H2 mode is useful for many short client-first exchanges, but it is not a `net.Conn` transport. A single H2 request stream is not a reliable open-ended full-duplex TCP tunnel, so interactive connections use WSS.
 
 ## Requirements
 
@@ -95,10 +103,10 @@ For a persistent deployment, configure the same values in your Cloudflare Worker
 npx wrangler deploy
 ```
 
-The Worker WebSocket endpoint is:
+Use the Worker base URL as the endpoint:
 
 ```text
-wss://<your-worker-host>/tcp
+https://<your-worker-host>
 ```
 
 ## Run The Agent
@@ -108,7 +116,7 @@ Run the local SOCKS5 agent from source:
 ```bash
 go run ./cmd/cf-socks-agent \
   -listen 127.0.0.1:1080 \
-  -worker-url wss://<your-worker-host>/tcp \
+  -worker-url https://<your-worker-host> \
   -auth-secret "$CF_SOCKS_AUTH_SECRET"
 ```
 
@@ -118,7 +126,7 @@ Or build a local binary:
 go build -o cf-socks-agent ./cmd/cf-socks-agent
 ./cf-socks-agent \
   -listen 127.0.0.1:1080 \
-  -worker-url wss://<your-worker-host>/tcp \
+  -worker-url https://<your-worker-host> \
   -auth-secret "$CF_SOCKS_AUTH_SECRET"
 ```
 
@@ -127,6 +135,8 @@ Then configure applications to use:
 ```text
 socks5h://127.0.0.1:1080
 ```
+
+The agent closes idle proxied connections after 5 minutes by default. Use `-idle-timeout -1` to disable the idle timeout.
 
 ## Verify
 
@@ -148,9 +158,45 @@ Check the observed outbound IP through the proxy:
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
 ```
 
+## Go SDK
+
+Import the Go client SDK from `github.com/bnkrr/cf-socks/sdk/go`.
+
+Use WSS `Dial` when you need an interactive TCP stream:
+
+```go
+import cfsocks "github.com/bnkrr/cf-socks/sdk/go"
+
+client := cfsocks.Client{
+    Endpoint:  "https://<your-worker-host>",
+    Secret:    os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Transport: cfsocks.TransportWSS,
+}
+conn, err := client.Dial(ctx, "tcp", "httpforever.com:80")
+```
+
+Use H2 `Do` when you have a bounded payload:
+
+```go
+import cfsocks "github.com/bnkrr/cf-socks/sdk/go"
+
+client := cfsocks.Client{
+    Endpoint:  "https://<your-worker-host>",
+    Secret:    os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Transport: cfsocks.TransportH2,
+}
+resp, err := client.Do(ctx, "tcp", "httpforever.com:80", strings.NewReader(
+    "GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n",
+))
+```
+
+`Do(ctx, "tcp", "github.com:22", nil)` sends an empty payload and can read server-first banners such as SSH. It is still not an interactive connection.
+
+WSS `Dial` returns a `net.Conn`. Read deadlines are recoverable local wait timeouts. Write deadlines are checked before a WebSocket message write begins; once a write has started, use `Close()` to abandon the connection. Closing WSS also closes the Worker-side target TCP connection, so the same TCP session cannot be resumed by reconnecting.
+
 ## Security
 
-The Worker is not an open proxy. The local agent must authenticate with a shared secret before the Worker opens any outbound TCP connection.
+The Worker is not an open proxy. Clients authenticate with an encrypted bearer token derived from `AUTH_SECRET` before the Worker opens any outbound TCP connection.
 
 Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variables, or local shell environment variables.
 
@@ -159,6 +205,7 @@ Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variabl
 - Worker outbound TCP cannot connect to Cloudflare IP ranges.
 - SOCKS5 UDP ASSOCIATE and BIND are not implemented.
 - Each proxied TCP connection uses one WebSocket to the Worker.
+- H2 mode is bounded-payload only; it is not a SOCKS or `net.Conn` transport.
 
 ## Related Projects
 

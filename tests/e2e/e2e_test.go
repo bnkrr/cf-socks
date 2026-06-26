@@ -17,7 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnkrr/cf-socks/agent"
+	cfsocks "github.com/bnkrr/cf-socks/sdk/go"
+	"github.com/bnkrr/cf-socks/socksagent"
 )
 
 func TestRealHTTPOverSocks(t *testing.T) {
@@ -113,6 +114,59 @@ func TestRealCurlThroughSocks(t *testing.T) {
 	}
 }
 
+func TestRealH2PayloadHTTP(t *testing.T) {
+	requireE2E(t)
+	host, port := target(t, "E2E_HTTP_TARGET", "httpforever.com:80")
+	preflightTarget(t, host, port)
+
+	client := cfsocks.Client{
+		Endpoint:  os.Getenv("E2E_WORKER_URL"),
+		Secret:    os.Getenv("E2E_AUTH_SECRET"),
+		Transport: cfsocks.TransportH2,
+	}
+	payload := strings.NewReader(fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.Do(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "HTTP/") {
+		t.Fatalf("unexpected HTTP status line %q", line)
+	}
+}
+
+func TestRealH2NilPayloadTCPBanner(t *testing.T) {
+	requireE2E(t)
+	host, port := target(t, "E2E_TCP_BANNER_TARGET", "github.com:22")
+	preflightTarget(t, host, port)
+
+	client := cfsocks.Client{
+		Endpoint:  os.Getenv("E2E_WORKER_URL"),
+		Secret:    os.Getenv("E2E_AUTH_SECRET"),
+		Transport: cfsocks.TransportH2,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.Do(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "SSH-") {
+		t.Fatalf("unexpected TCP banner %q", line)
+	}
+}
+
 func dialViaAgent(t *testing.T, host string, port int) net.Conn {
 	t.Helper()
 
@@ -140,7 +194,7 @@ func startAgent(t *testing.T) string {
 	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
-		_ = agent.Serve(ctx, ln, agent.Config{
+		_ = socksagent.Serve(ctx, ln, socksagent.Config{
 			WorkerURL:   os.Getenv("E2E_WORKER_URL"),
 			AuthSecret:  os.Getenv("E2E_AUTH_SECRET"),
 			DialTimeout: 20 * time.Second,
