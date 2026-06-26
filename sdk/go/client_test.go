@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnkrr/cf-socks/internal/token"
+	"github.com/bnkrr/cf-socks/sdk/go/internal/token"
 	"nhooyr.io/websocket"
 )
 

@@ -39,7 +39,11 @@ For custom clients, `Client.Do` uses HTTP/2 or HTTP/3 for bounded payloads:
 payload -> H2/H3 POST -> Cloudflare Worker -> TCP target -> response body
 ```
 
-H2/H3 mode is useful for many short client-first exchanges, but it is not a `net.Conn` transport. A single HTTP request stream is not a reliable open-ended full-duplex TCP tunnel on Workers, so interactive connections use WSS.
+H2/H3 mode is useful for many short client-first exchanges, but it is not a `net.Conn` transport. In Workers H2/H3 tests, response headers and body bytes did not reach the client while the request body remained open, so a single HTTP request stream is not a reliable open-ended full-duplex TCP tunnel. Interactive connections use WSS instead.
+
+## Transport Semantics
+
+`cf-socks` keeps connection semantics explicit because Workers' HTTP request path does not provide the same open-ended full-duplex behavior as a TCP socket for this use case. WSS `Dial` is the interactive TCP path and returns a `net.Conn`. H2/H3 `Do` is a bounded request/response operation: it sends one optional payload to a TCP target and streams back the target response. This also makes server-first reads, such as `Do(nil)` for SSH banners, an intentional API without implying that H2/H3 is a general TCP connection.
 
 ## Requirements
 
@@ -228,21 +232,20 @@ Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variabl
 
 - Worker outbound TCP cannot connect to Cloudflare IP ranges.
 - SOCKS5 UDP ASSOCIATE and BIND are not implemented.
-- Each proxied TCP connection uses one WebSocket to the Worker.
+- In WSS `Dial` and SOCKS agent mode, each TCP connection uses one WebSocket to the Worker.
 - H2/H3 mode is bounded-payload only; it is not a SOCKS or `net.Conn` transport, and it does not provide target-side TCP half-close/EOF signaling.
 
 ## Related Projects
 
-These projects overlap with parts of `cf-socks`, but use different product boundaries or data paths.
+`cf-socks` focuses on exposing Cloudflare Workers' outbound TCP `connect()` capability to clients: WSS `Dial` for interactive TCP, H2/H3 `Do` for bounded payloads, and a local SOCKS5 agent built on the same SDK. Related projects overlap with parts of that path, but usually choose a different product boundary.
 
 | Project | Similarity | Difference |
 | --- | --- | --- |
-| [serverless-proxy](https://github.com/serverless-proxy/serverless-proxy) | Worker dials TCP targets. | Custom WebSocket/HTTP2 entrypoint, not local SOCKS5. |
-| [ClassicUO gate](https://github.com/ClassicUO/gate) | Worker bridges WebSocket to TCP. | Fixed game-server target, not a general dialer. |
-| [zizifn/edgetunnel](https://github.com/zizifn/edgetunnel) | Worker dials TCP targets. | VLESS-oriented proxy stack. |
-| [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel) | Worker dials TCP targets. | Broader edge proxy configuration ecosystem. |
+| [serverless-proxy](https://github.com/serverless-proxy/serverless-proxy) | Closest technical match: serverless WebSocket/HTTP2 to TCP proxy. | Different connection semantics: `cf-socks` keeps WSS `Dial` and H2/H3 `Do` as separate APIs. See [Transport Semantics](#transport-semantics). |
+| [ClassicUO gate](https://github.com/ClassicUO/gate) | Worker bridges WebSocket clients to TCP. | Purpose-built UO game proxy with fixed deployment assumptions, not a generic TCP dialer SDK. |
+| [zizifn/edgetunnel](https://github.com/zizifn/edgetunnel) | Worker dials TCP targets. | VLESS-oriented proxy node rather than a client SDK plus SOCKS agent. |
+| [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel) | Worker dials TCP targets. | Broader edge proxy configuration ecosystem, not a small programmable dialer. |
 | [EDtunnel](https://github.com/6Kmfi6HP/EDtunnel) | Worker dials TCP targets. | Multi-protocol VLESS/Trojan/SOCKS-style proxy node. |
-| [linksocks](https://github.com/linksocks/linksocks) | SOCKS-over-WebSocket tunnel platform. | Worker mode is connector/provider relay oriented. |
-| [linksocks.js](https://github.com/linksocks/linksocks.js) | Runs on Cloudflare Workers. | Relays connector and provider peers instead of dialing targets directly. |
-| [socksflareprox](https://github.com/quippy-dev/socksflareprox) | Local SOCKS with Cloudflare in the path. | Uses Worker HTTP endpoints and a Python client. |
-| [cf-fetch-socks](https://github.com/oxcl/cf-fetch-socks) | Combines Workers and SOCKS concepts. | Worker uses an upstream SOCKS proxy; traffic direction is opposite. |
+| [linksocks](https://github.com/linksocks/linksocks) / [linksocks.js](https://github.com/linksocks/linksocks.js) | SOCKS-over-WebSocket and Worker-compatible relay ideas. | Connector/provider relay model for bridging peers or private networks, not Worker direct-dialing the requested target per SDK call. |
+| [SocksFlareProx](https://github.com/quippy-dev/socksflareprox) / FlareProx-style tools | Local SOCKS or HTTP proxying through Cloudflare Workers. | HTTP endpoint/request proxy model; less focused on general raw TCP `Dial`/`Do` semantics. |
+| [cf-fetch-socks](https://github.com/oxcl/cf-fetch-socks) | Combines Workers and SOCKS concepts. | Opposite direction: Worker-side HTTP client uses an upstream SOCKS5 proxy. |
