@@ -19,6 +19,7 @@ func main() {
 	authSecret := flag.String("auth-secret", env("CF_SOCKS_AUTH_SECRET", ""), "secret used for Worker encrypted bearer-token authentication")
 	dialTimeout := flag.Duration("dial-timeout", durationEnv("CF_SOCKS_DIAL_TIMEOUT", 15*time.Second), "Worker/target dial timeout")
 	idleTimeout := flag.Duration("idle-timeout", durationEnv("CF_SOCKS_IDLE_TIMEOUT", 5*time.Minute), "proxied connection idle timeout; negative disables it")
+	insecureAllowHTTP := flag.Bool("insecure-allow-http", boolEnv("CF_SOCKS_INSECURE_ALLOW_HTTP", false), "allow http:// or ws:// Worker endpoints for local development only")
 	flag.Parse()
 
 	if *workerURL == "" || *authSecret == "" {
@@ -37,10 +38,11 @@ func main() {
 	defer stop()
 
 	if err := socksagent.Serve(ctx, ln, socksagent.Config{
-		WorkerURL:   *workerURL,
-		AuthSecret:  *authSecret,
-		DialTimeout: *dialTimeout,
-		IdleTimeout: *idleTimeout,
+		WorkerURL:         *workerURL,
+		AuthSecret:        *authSecret,
+		DialTimeout:       *dialTimeout,
+		IdleTimeout:       *idleTimeout,
+		InsecureAllowHTTP: *insecureAllowHTTP,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -50,6 +52,18 @@ func main() {
 func env(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return fallback
+}
+
+func boolEnv(key string, fallback bool) bool {
+	if value := os.Getenv(key); value != "" {
+		switch value {
+		case "1", "true", "TRUE", "yes", "YES":
+			return true
+		case "0", "false", "FALSE", "no", "NO":
+			return false
+		}
 	}
 	return fallback
 }

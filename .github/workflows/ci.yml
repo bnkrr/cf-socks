@@ -48,6 +48,9 @@ jobs:
       - name: Build agent
         run: go build -buildvcs=false ./cmd/cf-socks-agent
 
+      - name: Build benchmark CLI
+        run: go build -buildvcs=false ./cmd/cfsbench
+
   real-e2e:
     name: Real E2E
     runs-on: ubuntu-latest

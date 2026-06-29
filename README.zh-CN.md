@@ -218,6 +218,35 @@ resp, err := client.Do(ctx, "tcp", "httpforever.com:80", strings.NewReader(
 ))
 ```
 
+如果 bounded payload 需要更高并发，可以使用 pool。H2 pool 在 root SDK 中：
+
+```go
+pool, err := cfsocks.NewClientPool(cfsocks.ClientPoolConfig{
+    Endpoint:  "https://<your-worker-host>",
+    Secret:    os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Transport: cfsocks.TransportH2,
+    Size:      4,
+})
+defer pool.Close()
+
+resp, err := pool.Do(ctx, "tcp", "httpforever.com:80", payload)
+```
+
+H3 的生命周期管理放在 `h3` helper package 中，这样 root SDK 不会强制所有用户引入 HTTP/3 依赖：
+
+```go
+import cfh3 "github.com/bnkrr/cf-socks/sdk/go/h3"
+
+pool, err := cfh3.NewPool(cfh3.PoolConfig{
+    Endpoint: "https://<your-worker-host>",
+    Secret:   os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Size:     4,
+})
+defer pool.Close()
+
+resp, err := pool.Do(ctx, "tcp", "httpforever.com:80", payload)
+```
+
 `Do(ctx, "tcp", "github.com:22", nil)` 会发送空 payload，H2 或 H3 都可读取 SSH 这类 server-first banner；但它仍然不是交互式连接。`Do` 在发送 payload 后也不会向目标 TCP 侧发送 EOF；它适合目标能根据已发送字节响应，或目标会先发数据的场景。
 
 WSS `Dial` 返回 `net.Conn`。读 deadline 是可恢复的本地等待超时；写 deadline 只会在 WebSocket message 开始写入前生效，一旦写入已经开始，如需放弃连接请调用 `Close()`。关闭 WSS 也会关闭 Worker 侧的目标 TCP 连接，重连不能恢复同一个 TCP session。
@@ -227,6 +256,10 @@ WSS `Dial` 返回 `net.Conn`。读 deadline 是可恢复的本地等待超时；
 Worker 不是开放代理。客户端必须先使用从 `AUTH_SECRET` 派生的加密 bearer token 完成鉴权，Worker 才会打开任何出站 TCP 连接。
 
 不要提交真实密钥。请使用 Wrangler secrets、Cloudflare 环境变量或本地 shell 环境变量。
+
+## Benchmarks
+
+`cfsbench` 位于 `cmd/cfsbench`，可用于本地和真实 Worker benchmark。当前 DNS-over-TCP 测试显示：WSS 通过打开大量独立连接扩展吞吐，而 H2/H3 `Do` 在高并发 bounded request 场景下更适合使用 HTTP transport pool。命令、结果和解释见 [Benchmarks](docs/benchmarks.md)。
 
 ## 限制
 

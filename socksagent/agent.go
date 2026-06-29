@@ -16,11 +16,12 @@ import (
 )
 
 type Config struct {
-	WorkerURL   string
-	AuthSecret  string
-	DialTimeout time.Duration
-	IdleTimeout time.Duration
-	HTTPClient  *http.Client
+	WorkerURL         string
+	AuthSecret        string
+	DialTimeout       time.Duration
+	IdleTimeout       time.Duration
+	HTTPClient        *http.Client
+	InsecureAllowHTTP bool
 }
 
 func (c Config) withDefaults() Config {
@@ -78,10 +79,11 @@ func handleClient(parent context.Context, client net.Conn, cfg Config) error {
 	defer cancel()
 
 	remote, err := (&cfsocks.Client{
-		Endpoint:   cfg.WorkerURL,
-		Secret:     cfg.AuthSecret,
-		Transport:  cfsocks.TransportWSS,
-		HTTPClient: cfg.HTTPClient,
+		Endpoint:          cfg.WorkerURL,
+		Secret:            cfg.AuthSecret,
+		Transport:         cfsocks.TransportWSS,
+		HTTPClient:        cfg.HTTPClient,
+		InsecureAllowHTTP: cfg.InsecureAllowHTTP,
 	}).Dial(dialCtx, "tcp", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)))
 	if err != nil {
 		_ = writeReply(client, 0x01)

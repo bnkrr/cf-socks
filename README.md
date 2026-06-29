@@ -218,6 +218,37 @@ resp, err := client.Do(ctx, "tcp", "httpforever.com:80", strings.NewReader(
 ))
 ```
 
+For higher concurrency with bounded payloads, use a pool. H2 pooling is in the
+root SDK:
+
+```go
+pool, err := cfsocks.NewClientPool(cfsocks.ClientPoolConfig{
+    Endpoint:  "https://<your-worker-host>",
+    Secret:    os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Transport: cfsocks.TransportH2,
+    Size:      4,
+})
+defer pool.Close()
+
+resp, err := pool.Do(ctx, "tcp", "httpforever.com:80", payload)
+```
+
+H3 lifecycle management lives in the `h3` helper package so the root SDK does
+not force an HTTP/3 dependency on every user:
+
+```go
+import cfh3 "github.com/bnkrr/cf-socks/sdk/go/h3"
+
+pool, err := cfh3.NewPool(cfh3.PoolConfig{
+    Endpoint: "https://<your-worker-host>",
+    Secret:   os.Getenv("CF_SOCKS_AUTH_SECRET"),
+    Size:     4,
+})
+defer pool.Close()
+
+resp, err := pool.Do(ctx, "tcp", "httpforever.com:80", payload)
+```
+
 `Do(ctx, "tcp", "github.com:22", nil)` sends an empty payload and can read server-first banners such as SSH with either H2 or H3. It is still not an interactive connection. `Do` also does not signal target-side TCP EOF after sending the payload; use it for targets that can respond from the supplied bytes or speak first.
 
 WSS `Dial` returns a `net.Conn`. Read deadlines are recoverable local wait timeouts. Write deadlines are checked before a WebSocket message write begins; once a write has started, use `Close()` to abandon the connection. Closing WSS also closes the Worker-side target TCP connection, so the same TCP session cannot be resumed by reconnecting.
@@ -227,6 +258,14 @@ WSS `Dial` returns a `net.Conn`. Read deadlines are recoverable local wait timeo
 The Worker is not an open proxy. Clients authenticate with an encrypted bearer token derived from `AUTH_SECRET` before the Worker opens any outbound TCP connection.
 
 Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variables, or local shell environment variables.
+
+## Benchmarks
+
+`cfsbench` is available under `cmd/cfsbench` for local and real Worker benchmark
+runs. Current DNS-over-TCP tests show WSS scales by opening many independent
+connections, while H2/H3 `Do` benefits from pooled HTTP transports for high
+bounded-request throughput. See [Benchmarks](docs/benchmarks.md) for commands,
+results, and interpretation.
 
 ## Limitations
 

@@ -11,6 +11,7 @@ tmp/
 .env
 .dev.vars
 /cf-socks-agent
+/cfsbench
 /bin/
 
 # OS/editor noise

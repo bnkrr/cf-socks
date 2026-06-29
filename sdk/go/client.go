@@ -27,10 +27,11 @@ const (
 )
 
 type Client struct {
-	Endpoint   string
-	Secret     string
-	Transport  Transport
-	HTTPClient *http.Client
+	Endpoint          string
+	Secret            string
+	Transport         Transport
+	HTTPClient        *http.Client
+	InsecureAllowHTTP bool
 }
 
 type Response struct {
@@ -170,14 +171,24 @@ func (c *Client) endpoint(path string, ws bool) (string, error) {
 	switch parsed.Scheme {
 	case "https", "wss":
 	case "http", "ws":
-		return "", errors.New("endpoint must use https:// or wss://")
+		if !c.InsecureAllowHTTP {
+			return "", errors.New("endpoint must use https:// or wss://")
+		}
 	default:
 		return "", errors.New("endpoint must use https:// or wss://")
 	}
 	if ws {
-		parsed.Scheme = "wss"
+		if parsed.Scheme == "http" || parsed.Scheme == "ws" {
+			parsed.Scheme = "ws"
+		} else {
+			parsed.Scheme = "wss"
+		}
 	} else {
-		parsed.Scheme = "https"
+		if parsed.Scheme == "http" || parsed.Scheme == "ws" {
+			parsed.Scheme = "http"
+		} else {
+			parsed.Scheme = "https"
+		}
 	}
 	parsed.Path = path
 	parsed.RawQuery = ""

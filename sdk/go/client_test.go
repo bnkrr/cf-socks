@@ -408,6 +408,186 @@ func TestClientDoH3RequiresHTTPClient(t *testing.T) {
 	}
 }
 
+func TestClientPoolRejectsUnsupportedTransports(t *testing.T) {
+	if _, err := NewClientPool(ClientPoolConfig{Transport: TransportWSS}); !errors.Is(err, ErrUnsupportedTransport) {
+		t.Fatalf("wss err = %v, want ErrUnsupportedTransport", err)
+	}
+	if _, err := NewClientPool(ClientPoolConfig{Transport: "bogus"}); !errors.Is(err, ErrUnsupportedTransport) {
+		t.Fatalf("bogus err = %v, want ErrUnsupportedTransport", err)
+	}
+}
+
+func TestClientPoolDefaultsH2SizeAndOwnsTransports(t *testing.T) {
+	pool, err := NewClientPool(ClientPoolConfig{Endpoint: "https://worker.test", Secret: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if len(pool.clients) != defaultClientPoolSize {
+		t.Fatalf("clients = %d, want %d", len(pool.clients), defaultClientPoolSize)
+	}
+	if len(pool.owned) != defaultClientPoolSize {
+		t.Fatalf("owned = %d, want %d", len(pool.owned), defaultClientPoolSize)
+	}
+	if pool.clients[0].HTTPClient == pool.clients[1].HTTPClient {
+		t.Fatal("pool slots share HTTP clients")
+	}
+	if err := pool.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientPoolToleratesReplacedDefaultTransport(t *testing.T) {
+	orig := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected request")
+	})
+	defer func() { http.DefaultTransport = orig }()
+
+	pool, err := NewClientPool(ClientPoolConfig{Endpoint: "https://worker.test", Secret: "secret", Size: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if len(pool.owned) != 2 {
+		t.Fatalf("owned = %d, want 2", len(pool.owned))
+	}
+}
+
+func TestClientPoolH3RequiresHTTPClients(t *testing.T) {
+	if _, err := NewClientPool(ClientPoolConfig{
+		Endpoint:  "https://worker.test",
+		Secret:    "secret",
+		Transport: TransportH3,
+		Size:      2,
+	}); !errors.Is(err, ErrHTTPClientRequired) {
+		t.Fatalf("err = %v, want ErrHTTPClientRequired", err)
+	}
+}
+
+func TestClientPoolRejectsMismatchedHTTPClients(t *testing.T) {
+	if _, err := NewClientPool(ClientPoolConfig{
+		Endpoint:    "https://worker.test",
+		Secret:      "secret",
+		Transport:   TransportH2,
+		Size:        2,
+		HTTPClients: []*http.Client{{}},
+	}); err == nil {
+		t.Fatal("expected mismatched HTTPClients error")
+	}
+	if _, err := NewClientPool(ClientPoolConfig{
+		Endpoint:    "https://worker.test",
+		Secret:      "secret",
+		Transport:   TransportH2,
+		Size:        1,
+		HTTPClients: []*http.Client{nil},
+	}); err == nil {
+		t.Fatal("expected nil HTTPClients error")
+	}
+}
+
+func TestClientPoolInfersSizeFromHTTPClients(t *testing.T) {
+	pool, err := NewClientPool(ClientPoolConfig{
+		Endpoint:    "https://worker.test",
+		Secret:      "secret",
+		Transport:   TransportH3,
+		HTTPClients: []*http.Client{{}, {}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pool.clients) != 2 {
+		t.Fatalf("clients = %d, want 2", len(pool.clients))
+	}
+	if len(pool.owned) != 0 {
+		t.Fatalf("owned = %d, want 0", len(pool.owned))
+	}
+}
+
+func TestClientPoolRoundRobinDo(t *testing.T) {
+	const secret = "test-secret"
+	counts := make([]int, 2)
+	clients := make([]*http.Client, len(counts))
+	for i := range counts {
+		slot := i
+		clients[i] = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			counts[slot]++
+			if _, err := token.Open(secret, token.AAD(req.Method, req.URL.Path), bearer(t, req), token.OpenOptions{Now: time.Now()}); err != nil {
+				t.Fatalf("open token: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Proto:      "HTTP/2.0",
+				ProtoMajor: 2,
+				ProtoMinor: 0,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})}
+	}
+	pool, err := NewClientPool(ClientPoolConfig{
+		Endpoint:    "https://worker.test",
+		Secret:      secret,
+		Transport:   TransportH2,
+		Size:        len(clients),
+		HTTPClients: clients,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		resp, err := pool.Do(context.Background(), "tcp", "example.test:80", strings.NewReader("payload"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+	if counts[0] != 2 || counts[1] != 2 {
+		t.Fatalf("counts = %v, want [2 2]", counts)
+	}
+}
+
+func TestClientPoolH2DoWithProvidedClients(t *testing.T) {
+	const secret = "test-secret"
+	worker := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := token.Open(secret, token.AAD(r.Method, r.URL.Path), bearer(t, r), token.OpenOptions{Now: time.Now()}); err != nil {
+			t.Errorf("open token: %v", err)
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		_, _ = fmt.Fprintf(w, "got:%s", body)
+	}))
+	worker.EnableHTTP2 = true
+	worker.StartTLS()
+	defer worker.Close()
+
+	pool, err := NewClientPool(ClientPoolConfig{
+		Endpoint:    worker.URL,
+		Secret:      secret,
+		Transport:   TransportH2,
+		Size:        2,
+		HTTPClients: []*http.Client{worker.Client(), worker.Client()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := pool.Do(context.Background(), "tcp", "example.test:80", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "got:payload" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func TestClientDoRejectsNonHTTP2Response(t *testing.T) {
 	const secret = "test-secret"
 	worker := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -471,6 +651,31 @@ func TestClientRejectsUnsupportedTransportAndNetwork(t *testing.T) {
 	}
 	if _, err := (&Client{Transport: TransportWSS}).Dial(context.Background(), "udp", "example.test:80"); err != ErrUnsupportedNetwork {
 		t.Fatalf("network err = %v", err)
+	}
+}
+
+func TestClientEndpointRejectsInsecureByDefault(t *testing.T) {
+	client := Client{Endpoint: "http://127.0.0.1:8787", Transport: TransportH2}
+	if _, err := client.endpoint("/h2", false); err == nil {
+		t.Fatal("expected insecure endpoint rejection")
+	}
+}
+
+func TestClientEndpointAllowsInsecureWhenExplicit(t *testing.T) {
+	client := Client{Endpoint: "http://127.0.0.1:8787/base", InsecureAllowHTTP: true}
+	got, err := client.endpoint("/wss", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ws://127.0.0.1:8787/wss" {
+		t.Fatalf("wss endpoint = %q", got)
+	}
+	got, err = client.endpoint("/h2", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://127.0.0.1:8787/h2" {
+		t.Fatalf("h2 endpoint = %q", got)
 	}
 }
 
