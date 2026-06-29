@@ -1,11 +1,11 @@
 {
   "name": "cf-socks",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cloudflare Worker backed TCP dialer with SOCKS5 and Go SDK clients",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "e2e:real": "scripts/e2e-real.sh",
+    "e2e:real": "tests/e2e/run.sh",
     "worker:bundle-dashboard": "esbuild worker/src/index.ts --bundle --format=esm --platform=browser --target=es2022 --external:cloudflare:sockets --banner:js=\"// Generated from worker/src/index.ts. Do not edit by hand.\" --outfile=worker/single-file.js",
     "worker:deploy:temporary": "wrangler deploy --temporary",
     "worker:dev": "wrangler dev"

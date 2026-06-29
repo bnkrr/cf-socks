@@ -65,6 +65,7 @@ Generate a shared secret:
 
 ```bash
 export CF_SOCKS_AUTH_SECRET="$(openssl rand -hex 32)"
+export CF_SOCKS_DIRECT_BEARER="$(openssl rand -base64 32)"
 ```
 
 ### Option A: Cloudflare Dashboard
@@ -74,6 +75,7 @@ Create a Worker in the Cloudflare dashboard, copy [worker/single-file.js](worker
 ```text
 AUTH_SECRET=<your generated secret>
 AUTH_WINDOW_SECONDS=120
+DIRECT_BEARER=<your generated direct bearer>
 ```
 
 Deploy the Worker from the dashboard. No local Node.js, npm, or Wrangler setup is required for this path.
@@ -100,7 +102,8 @@ For a quick temporary deployment:
 ```bash
 npx wrangler deploy --temporary \
   --var "AUTH_SECRET:$CF_SOCKS_AUTH_SECRET" \
-  --var "AUTH_WINDOW_SECONDS:120"
+  --var "AUTH_WINDOW_SECONDS:120" \
+  --var "DIRECT_BEARER:$CF_SOCKS_DIRECT_BEARER"
 ```
 
 For a persistent deployment, configure the same values in your Cloudflare Worker environment and deploy:
@@ -162,6 +165,26 @@ Check the observed outbound IP through the proxy:
 
 ```bash
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
+```
+
+You can also verify bounded TCP payloads without installing the agent or SDK by using the Direct endpoint:
+
+```bash
+printf 'GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n' \
+  | curl --http2 --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+      --data-binary @- \
+      https://<your-worker-host>/direct/httpforever.com/80
+```
+
+For server-first protocols such as SSH banners:
+
+```bash
+curl --http2 --no-buffer --max-time 10 \
+  -X POST \
+  -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+  https://<your-worker-host>/direct/github.com/22
 ```
 
 ## Go SDK
@@ -258,6 +281,8 @@ WSS `Dial` returns a `net.Conn`. Read deadlines are recoverable local wait timeo
 ## Security
 
 The Worker is not an open proxy. Clients authenticate with an encrypted bearer token derived from `AUTH_SECRET` before the Worker opens any outbound TCP connection.
+
+The Direct endpoint is disabled unless `DIRECT_BEARER` is configured. Treat it as a long-lived API key and rotate it if it is exposed.
 
 Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variables, or local shell environment variables.
 

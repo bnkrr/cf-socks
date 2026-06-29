@@ -65,6 +65,7 @@ go mod download
 
 ```bash
 export CF_SOCKS_AUTH_SECRET="$(openssl rand -hex 32)"
+export CF_SOCKS_DIRECT_BEARER="$(openssl rand -base64 32)"
 ```
 
 ### 方式 A：Cloudflare Dashboard
@@ -74,6 +75,7 @@ export CF_SOCKS_AUTH_SECRET="$(openssl rand -hex 32)"
 ```text
 AUTH_SECRET=<your generated secret>
 AUTH_WINDOW_SECONDS=120
+DIRECT_BEARER=<your generated direct bearer>
 ```
 
 然后在 dashboard 中部署 Worker。这个路径不需要本地安装 Node.js、npm 或 Wrangler。
@@ -100,7 +102,8 @@ npm install
 ```bash
 npx wrangler deploy --temporary \
   --var "AUTH_SECRET:$CF_SOCKS_AUTH_SECRET" \
-  --var "AUTH_WINDOW_SECONDS:120"
+  --var "AUTH_WINDOW_SECONDS:120" \
+  --var "DIRECT_BEARER:$CF_SOCKS_DIRECT_BEARER"
 ```
 
 持久部署时，在 Cloudflare Worker 环境中配置相同的值，然后部署：
@@ -162,6 +165,26 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/
 
 ```bash
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
+```
+
+也可以不安装 agent 或 SDK，直接用 Direct endpoint 验证 bounded TCP payload：
+
+```bash
+printf 'GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n' \
+  | curl --http2 --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+      --data-binary @- \
+      https://<your-worker-host>/direct/httpforever.com/80
+```
+
+对 SSH banner 这类 server-first 协议：
+
+```bash
+curl --http2 --no-buffer --max-time 10 \
+  -X POST \
+  -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+  https://<your-worker-host>/direct/github.com/22
 ```
 
 ## Go SDK
@@ -256,6 +279,8 @@ WSS `Dial` 返回 `net.Conn`。读 deadline 是可恢复的本地等待超时；
 ## 安全
 
 Worker 不是开放代理。客户端必须先使用从 `AUTH_SECRET` 派生的加密 bearer token 完成鉴权，Worker 才会打开任何出站 TCP 连接。
+
+Direct endpoint 只有配置了 `DIRECT_BEARER` 才会启用。请把它当作长期 API key；如果泄漏，应立即轮换。
 
 不要提交真实密钥。请使用 Wrangler secrets、Cloudflare 环境变量或本地 shell 环境变量。
 

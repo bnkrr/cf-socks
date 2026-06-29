@@ -118,13 +118,15 @@ func TestRealCurlThroughSocks(t *testing.T) {
 
 func TestRealH2PayloadHTTP(t *testing.T) {
 	requireE2E(t)
+	requireHTTPVersionE2E(t)
 	host, port := target(t, "E2E_HTTP_TARGET", "httpforever.com:80")
 	preflightTarget(t, host, port)
 
 	client := cfsocks.Client{
-		Endpoint:  os.Getenv("E2E_WORKER_URL"),
-		Secret:    os.Getenv("E2E_AUTH_SECRET"),
-		Transport: cfsocks.TransportH2,
+		Endpoint:          os.Getenv("E2E_WORKER_URL"),
+		Secret:            os.Getenv("E2E_AUTH_SECRET"),
+		Transport:         cfsocks.TransportH2,
+		InsecureAllowHTTP: insecureAllowHTTP(),
 	}
 	payload := strings.NewReader(fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -145,13 +147,15 @@ func TestRealH2PayloadHTTP(t *testing.T) {
 
 func TestRealH2NilPayloadTCPBanner(t *testing.T) {
 	requireE2E(t)
+	requireHTTPVersionE2E(t)
 	host, port := target(t, "E2E_TCP_BANNER_TARGET", "github.com:22")
 	preflightTarget(t, host, port)
 
 	client := cfsocks.Client{
-		Endpoint:  os.Getenv("E2E_WORKER_URL"),
-		Secret:    os.Getenv("E2E_AUTH_SECRET"),
-		Transport: cfsocks.TransportH2,
+		Endpoint:          os.Getenv("E2E_WORKER_URL"),
+		Secret:            os.Getenv("E2E_AUTH_SECRET"),
+		Transport:         cfsocks.TransportH2,
+		InsecureAllowHTTP: insecureAllowHTTP(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -171,16 +175,18 @@ func TestRealH2NilPayloadTCPBanner(t *testing.T) {
 
 func TestRealH3PayloadHTTP(t *testing.T) {
 	requireE2E(t)
+	requireHTTPVersionE2E(t)
 	host, port := target(t, "E2E_HTTP_TARGET", "httpforever.com:80")
 	preflightTarget(t, host, port)
 
 	transport := &http3.Transport{}
 	defer transport.Close()
 	client := cfsocks.Client{
-		Endpoint:   os.Getenv("E2E_WORKER_URL"),
-		Secret:     os.Getenv("E2E_AUTH_SECRET"),
-		Transport:  cfsocks.TransportH3,
-		HTTPClient: &http.Client{Transport: transport},
+		Endpoint:          os.Getenv("E2E_WORKER_URL"),
+		Secret:            os.Getenv("E2E_AUTH_SECRET"),
+		Transport:         cfsocks.TransportH3,
+		HTTPClient:        &http.Client{Transport: transport},
+		InsecureAllowHTTP: insecureAllowHTTP(),
 	}
 	payload := strings.NewReader(fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -201,16 +207,18 @@ func TestRealH3PayloadHTTP(t *testing.T) {
 
 func TestRealH3NilPayloadTCPBanner(t *testing.T) {
 	requireE2E(t)
+	requireHTTPVersionE2E(t)
 	host, port := target(t, "E2E_TCP_BANNER_TARGET", "github.com:22")
 	preflightTarget(t, host, port)
 
 	transport := &http3.Transport{}
 	defer transport.Close()
 	client := cfsocks.Client{
-		Endpoint:   os.Getenv("E2E_WORKER_URL"),
-		Secret:     os.Getenv("E2E_AUTH_SECRET"),
-		Transport:  cfsocks.TransportH3,
-		HTTPClient: &http.Client{Transport: transport},
+		Endpoint:          os.Getenv("E2E_WORKER_URL"),
+		Secret:            os.Getenv("E2E_AUTH_SECRET"),
+		Transport:         cfsocks.TransportH3,
+		HTTPClient:        &http.Client{Transport: transport},
+		InsecureAllowHTTP: insecureAllowHTTP(),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -256,9 +264,10 @@ func startAgent(t *testing.T) string {
 
 	go func() {
 		_ = socksagent.Serve(ctx, ln, socksagent.Config{
-			WorkerURL:   os.Getenv("E2E_WORKER_URL"),
-			AuthSecret:  os.Getenv("E2E_AUTH_SECRET"),
-			DialTimeout: 20 * time.Second,
+			WorkerURL:         os.Getenv("E2E_WORKER_URL"),
+			AuthSecret:        os.Getenv("E2E_AUTH_SECRET"),
+			DialTimeout:       20 * time.Second,
+			InsecureAllowHTTP: insecureAllowHTTP(),
 		})
 	}()
 	return ln.Addr().String()
@@ -268,6 +277,22 @@ func requireE2E(t *testing.T) {
 	t.Helper()
 	if os.Getenv("E2E_WORKER_URL") == "" || os.Getenv("E2E_AUTH_SECRET") == "" {
 		t.Skip("E2E_WORKER_URL and E2E_AUTH_SECRET are required for real E2E")
+	}
+}
+
+func requireHTTPVersionE2E(t *testing.T) {
+	t.Helper()
+	if insecureAllowHTTP() || !strings.HasPrefix(os.Getenv("E2E_WORKER_URL"), "https://") {
+		t.Skip("HTTP/2 and HTTP/3 E2E require a working HTTPS Worker endpoint")
+	}
+}
+
+func insecureAllowHTTP() bool {
+	switch os.Getenv("E2E_INSECURE_ALLOW_HTTP") {
+	case "1", "true", "TRUE", "yes", "YES":
+		return true
+	default:
+		return false
 	}
 }
 

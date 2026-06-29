@@ -20,6 +20,8 @@ There are two transport shapes:
 - **H2/H3 Do**: bounded payload exchange. One HTTP request body is copied to one
   Worker-side TCP socket, and the target readable stream is returned as the HTTP
   response body.
+- **Direct HTTP payload**: curl-friendly bounded payload exchange. Target host
+  and port are read from the URL and a static bearer token authorizes access.
 
 The split exists because the Cloudflare Workers inbound implementations for
 WebSocket and HTTP requests expose different stream semantics to Worker code.
@@ -60,6 +62,17 @@ Same protocol model as `/h2`, but the client expects HTTP/3 transport.
 The Worker route is intentionally the same implementation shape as `/h2`; the
 client-selected HTTP version is a transport property, not a different TCP relay
 protocol.
+
+### `POST /direct/:host/:port`
+
+Creates one bounded payload exchange over the client's selected HTTP transport.
+
+- Requires `DIRECT_BEARER` to be configured on the Worker.
+- Requires `Authorization: Bearer <DIRECT_BEARER>`.
+- Target `host` and `port` are read from the URL path.
+- Request body bytes are copied to target writable.
+- Target readable bytes are streamed as response body.
+- This endpoint is not used by the Go SDK or local SOCKS agent.
 
 ## Authentication Token
 
@@ -139,6 +152,19 @@ The replay cache is deliberately checked after successful decrypt. This avoids
 storing arbitrary unauthenticated bytes from invalid requests and makes the
 cache key correspond to a token that was valid under the configured secret.
 
+## Direct Bearer
+
+The Direct endpoint uses a separate static bearer:
+
+```http
+Authorization: Bearer <DIRECT_BEARER>
+```
+
+This is intentionally simpler than the encrypted SDK token so tools like `curl`
+can verify the Worker without installing a client. It is a long-lived API key:
+anyone who has it can use `/direct/:host/:port` until the Worker environment
+variable is changed or removed.
+
 ## Worker TCP Binding
 
 The Worker always authenticates first, then opens a target TCP socket with
@@ -204,6 +230,8 @@ and server-first reads, but it is not a general interactive TCP connection.
 - Unknown path: empty `404`.
 - Invalid auth, expired token, replayed nonce, wrong op, wrong method/path:
   empty `404`.
+- `/direct/:host/:port` when `DIRECT_BEARER` is missing, wrong, or target is
+  malformed: empty `404`.
 - `/wss` without WebSocket upgrade after valid auth: `426`.
 - `/wss` target connect failure after upgrade: text `ERR connect_failed\n`, then
   WebSocket close `1011`.
@@ -215,6 +243,9 @@ and server-first reads, but it is not a general interactive TCP connection.
 
 - Target `host` and `port` are encrypted in the bearer token. They are not
   placed in the URL or readable headers.
+- Direct endpoint targets are intentionally placed in the URL for curl
+  usability. Use the encrypted SDK endpoints when target metadata should not be
+  visible in paths or logs.
 - Worker TLS is provided by HTTPS/WSS/H3 and must be verified by clients.
 - The target TCP connection is raw TCP. cf-socks does not validate or terminate
   target TLS; applications can run TLS inside the TCP stream if they need it.

@@ -71,7 +71,8 @@ jobs:
         env:
           E2E_WORKER_URL: ${{ secrets.E2E_WORKER_URL }}
           E2E_AUTH_SECRET: ${{ secrets.E2E_AUTH_SECRET }}
+          E2E_DIRECT_BEARER: ${{ secrets.E2E_DIRECT_BEARER }}
           E2E_HTTP_TARGET: ${{ vars.E2E_HTTP_TARGET }}
           E2E_HTTPS_TARGET: ${{ vars.E2E_HTTPS_TARGET }}
           E2E_TCP_BANNER_TARGET: ${{ vars.E2E_TCP_BANNER_TARGET }}
-        run: scripts/e2e-real.sh
+        run: tests/e2e/run.sh

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
-
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export ROOT
 export PATH="$HOME/.local/go/bin:$PATH"
 
 if [ -z "${E2E_AUTH_SECRET:-}" ] && [ -f /tmp/cf-socks-e2e-secret ]; then
   export E2E_AUTH_SECRET="$(cat /tmp/cf-socks-e2e-secret)"
+fi
+
+if [ -z "${E2E_DIRECT_BEARER:-}" ] && [ -f /tmp/cf-socks-e2e-direct-bearer ]; then
+  export E2E_DIRECT_BEARER="$(cat /tmp/cf-socks-e2e-direct-bearer)"
 fi
 
 if [ -z "${E2E_WORKER_URL:-}" ]; then
@@ -19,13 +22,3 @@ if [ -z "${E2E_WORKER_URL:-}" ]; then
     fi
   fi
 fi
-
-if [ -z "${E2E_WORKER_URL:-}" ] || [ -z "${E2E_AUTH_SECRET:-}" ]; then
-  echo "E2E_WORKER_URL and E2E_AUTH_SECRET are required" >&2
-  exit 2
-fi
-
-GOPATH="${GOPATH:-/tmp/cf-socks-go}" \
-GOMODCACHE="${GOMODCACHE:-/tmp/cf-socks-go-mod-cache}" \
-GOCACHE="${GOCACHE:-/tmp/cf-socks-go-build-cache}" \
-go test ./tests/e2e -v -count=1 "$@"

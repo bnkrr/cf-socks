@@ -1,8 +1,5 @@
 // Generated from worker/src/index.ts. Do not edit by hand.
 
-// worker/src/index.ts
-import { connect } from "cloudflare:sockets";
-
 // worker/src/token.ts
 var VERSION = 2;
 var KEY_PREFIX = "cf-socks auth v2\n";
@@ -139,49 +136,123 @@ function toArrayBuffer(bytes) {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
-// worker/src/index.ts
+// worker/src/route.ts
 var nonceCache = new NonceCache();
-var index_default = {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    if (url.pathname === "/wss") {
-      return handleWSS(request, env, ctx);
-    }
-    if (url.pathname === "/h2" || url.pathname === "/h3") {
-      return handlePayload(request, env, ctx);
-    }
-    return notFound();
+async function resolveRoute(request, env, transport) {
+  const url = new URL(request.url);
+  const expectedOp = transport === "wss" ? "dial" : "payload";
+  if (transport === "wss" && url.pathname !== "/wss") {
+    return null;
   }
-};
-async function handleWSS(request, env, ctx) {
-  const claims = await verifyRequest(request, env, "dial");
+  if (transport === "payload" && url.pathname !== "/h2" && url.pathname !== "/h3") {
+    return null;
+  }
+  if (transport === "payload" && request.method !== "POST") {
+    return null;
+  }
+  if (!env.AUTH_SECRET) {
+    return null;
+  }
+  const claims = await verifyBearerToken(request.headers.get("Authorization"), {
+    secret: env.AUTH_SECRET,
+    method: request.method,
+    path: url.pathname,
+    expectedOp,
+    windowSeconds: parseWindowSeconds(env.AUTH_WINDOW_SECONDS),
+    nonceCache
+  });
   if (!claims) {
-    return notFound();
+    return null;
   }
-  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("upgrade required\n", { status: 426 });
-  }
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  server.accept();
-  server.binaryType = "arraybuffer";
-  ctx.waitUntil(handleTunnel(server, claims.host, claims.port));
-  return new Response(null, { status: 101, webSocket: client });
+  return {
+    op: claims.op,
+    target: { host: claims.host, port: claims.port },
+    transport,
+    path: url.pathname
+  };
 }
-async function handlePayload(request, env, ctx) {
-  if (request.method !== "POST") {
-    return notFound();
+function resolveDirectRoute(request, env) {
+  const url = new URL(request.url);
+  if (request.method !== "POST" || !url.pathname.startsWith("/direct/")) {
+    return null;
   }
-  const claims = await verifyRequest(request, env, "payload");
-  if (!claims) {
-    return notFound();
+  if (!env.DIRECT_BEARER || !verifyStaticBearer(request.headers.get("Authorization"), env.DIRECT_BEARER)) {
+    return null;
   }
+  const target = parseDirectTarget(url.pathname);
+  if (!target) {
+    return null;
+  }
+  return {
+    op: "payload",
+    target,
+    transport: "payload",
+    path: url.pathname
+  };
+}
+function parseDirectTarget(pathname) {
+  const parts = pathname.split("/");
+  if (parts.length !== 4 || parts[0] !== "" || parts[1] !== "direct") {
+    return null;
+  }
+  let host;
+  try {
+    host = decodeURIComponent(parts[2]);
+  } catch {
+    return null;
+  }
+  const port = Number.parseInt(parts[3], 10);
+  if (!host || host.length > 253 || host.includes("/") || host.includes("\n") || host.includes("\r") || !Number.isInteger(port) || port < 1 || port > 65535 || String(port) !== parts[3]) {
+    return null;
+  }
+  return { host, port };
+}
+function verifyStaticBearer(header, expected) {
+  const prefix = "Bearer ";
+  if (!header?.startsWith(prefix)) {
+    return false;
+  }
+  const actual = header.slice(prefix.length);
+  return actual.length === expected.length && constantTimeEqual(actual, expected);
+}
+function constantTimeEqual(a, b) {
+  let diff = a.length ^ b.length;
+  const max = Math.max(a.length, b.length);
+  for (let i = 0; i < max; i += 1) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+function parseWindowSeconds(value) {
+  if (!value) {
+    return 120;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 120;
+}
+
+// worker/src/tunnel.ts
+import { connect } from "cloudflare:sockets";
+async function runWssTunnel(ws, target) {
   let socket;
   try {
-    socket = connect({ hostname: claims.host, port: claims.port }, { secureTransport: "off", allowHalfOpen: true });
-    await socket.opened;
+    socket = await connectTarget(target, "wss");
   } catch {
-    return new Response(null, { status: 502 });
+    safeSend(ws, "ERR connect_failed\n");
+    ws.close(1011);
+    return;
+  }
+  const session = createWebSocketByteSession(ws);
+  const relayDone = relayWebSocketToSocket(session, socket);
+  session.send("OK\n");
+  await relayDone;
+}
+async function runPayloadExchange(request, target, ctx) {
+  let socket;
+  try {
+    socket = await connectTarget(target, "payload");
+  } catch {
+    return null;
   }
   ctx.waitUntil(
     pipeRequestToSocket(request, socket).catch(() => {
@@ -196,35 +267,39 @@ async function handlePayload(request, env, ctx) {
     }
   });
 }
-async function verifyRequest(request, env, expectedOp) {
-  if (!env.AUTH_SECRET) {
-    return null;
-  }
-  const url = new URL(request.url);
-  return verifyBearerToken(request.headers.get("Authorization"), {
-    secret: env.AUTH_SECRET,
-    method: request.method,
-    path: url.pathname,
-    expectedOp,
-    windowSeconds: parseWindowSeconds(env.AUTH_WINDOW_SECONDS),
-    nonceCache
-  });
+async function connectTarget(target, mode) {
+  const socket = mode === "payload" ? connect({ hostname: target.host, port: target.port }, { secureTransport: "off", allowHalfOpen: true }) : connect({ hostname: target.host, port: target.port });
+  await socket.opened;
+  return socket;
 }
-async function handleTunnel(ws, host, port) {
-  let socket;
-  try {
-    socket = connect({ hostname: host, port });
-    await socket.opened;
-  } catch {
-    safeSend(ws, "ERR connect_failed\n");
-    ws.close(1011);
-    return;
-  }
-  const relayDone = relay(ws, socket);
-  safeSend(ws, "OK\n");
-  await relayDone;
+function createWebSocketByteSession(ws) {
+  return {
+    send(data) {
+      safeSend(ws, data);
+    },
+    close(code = 1e3) {
+      try {
+        ws.close(code);
+      } catch {
+      }
+    },
+    onBinary(handler) {
+      ws.addEventListener("message", (event) => {
+        const data = event.data;
+        if (typeof data === "string") {
+          ws.close(1002);
+          return;
+        }
+        void binaryMessageBytes(data).then(handler).catch(() => ws.close(1011));
+      });
+    },
+    onClose(handler) {
+      ws.addEventListener("close", handler);
+      ws.addEventListener("error", handler);
+    }
+  };
 }
-async function relay(ws, socket) {
+async function relayWebSocketToSocket(session, socket) {
   const writer = socket.writable.getWriter();
   let writeChain = Promise.resolve();
   let closed = false;
@@ -233,26 +308,15 @@ async function relay(ws, socket) {
       return;
     }
     closed = true;
-    try {
-      ws.close(1e3);
-    } catch {
-    }
+    session.close(1e3);
     void writer.close().catch(() => void 0);
     void socket.close().catch(() => void 0);
   };
-  ws.addEventListener("message", (event) => {
-    const data = event.data;
-    if (typeof data === "string") {
-      ws.close(1002);
-      return;
-    }
-    writeChain = writeChain.then(async () => {
-      const bytes = await binaryMessageBytes(data);
-      await writer.write(bytes);
-    }).catch(closeBoth);
+  session.onBinary((bytes) => {
+    writeChain = writeChain.then(() => writer.write(bytes)).catch(closeBoth);
+    return writeChain;
   });
-  ws.addEventListener("close", closeBoth);
-  ws.addEventListener("error", closeBoth);
+  session.onClose(closeBoth);
   try {
     const reader = socket.readable.getReader();
     for (; ; ) {
@@ -261,7 +325,7 @@ async function relay(ws, socket) {
         break;
       }
       if (value) {
-        safeSend(ws, value);
+        session.send(value);
       }
     }
     await writeChain.catch(() => void 0);
@@ -281,13 +345,6 @@ async function binaryMessageBytes(data) {
     return new Uint8Array(await data.arrayBuffer());
   }
   throw new TypeError("unsupported binary message");
-}
-function parseWindowSeconds(value) {
-  if (!value) {
-    return 120;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 120;
 }
 async function pipeRequestToSocket(request, socket) {
   if (!request.body) {
@@ -310,9 +367,6 @@ async function pipeRequestToSocket(request, socket) {
     reader.releaseLock();
   }
 }
-function notFound() {
-  return new Response(null, { status: 404 });
-}
 function safeSend(ws, data) {
   try {
     if (ws.readyState === WebSocket.OPEN) {
@@ -320,6 +374,63 @@ function safeSend(ws, data) {
     }
   } catch {
   }
+}
+
+// worker/src/index.ts
+var index_default = {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === "/wss") {
+      return handleWSS(request, env, ctx);
+    }
+    if (url.pathname === "/h2" || url.pathname === "/h3") {
+      return handlePayload(request, env, ctx);
+    }
+    if (url.pathname.startsWith("/direct/")) {
+      return handleDirect(request, env, ctx);
+    }
+    return notFound();
+  }
+};
+async function handleWSS(request, env, ctx) {
+  const route = await resolveRoute(request, env, "wss");
+  if (!route) {
+    return notFound();
+  }
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("upgrade required\n", { status: 426 });
+  }
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
+  server.binaryType = "arraybuffer";
+  ctx.waitUntil(runWssTunnel(server, route.target));
+  return new Response(null, { status: 101, webSocket: client });
+}
+async function handlePayload(request, env, ctx) {
+  const route = await resolveRoute(request, env, "payload");
+  if (!route) {
+    return notFound();
+  }
+  const response = await runPayloadExchange(request, route.target, ctx);
+  if (!response) {
+    return new Response(null, { status: 502 });
+  }
+  return response;
+}
+async function handleDirect(request, env, ctx) {
+  const route = resolveDirectRoute(request, env);
+  if (!route) {
+    return notFound();
+  }
+  const response = await runPayloadExchange(request, route.target, ctx);
+  if (!response) {
+    return new Response(null, { status: 502 });
+  }
+  return response;
+}
+function notFound() {
+  return new Response(null, { status: 404 });
 }
 export {
   index_default as default
