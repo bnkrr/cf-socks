@@ -1,9 +1,11 @@
 package socksagent
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +16,10 @@ import (
 
 	cfsocks "github.com/bnkrr/cf-socks/sdk/go"
 )
+
+type Dialer interface {
+	Dial(ctx context.Context, network, address string) (net.Conn, error)
+}
 
 type Config struct {
 	WorkerURL         string
@@ -35,12 +41,17 @@ func (c Config) withDefaults() Config {
 }
 
 func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
-	cfg = cfg.withDefaults()
-	if cfg.WorkerURL == "" {
-		return errors.New("worker URL is required")
-	}
-	if cfg.AuthSecret == "" {
-		return errors.New("auth secret is required")
+	return serve(ctx, ln, cfg, handleSOCKSClient)
+}
+
+func ServeHTTPConnect(ctx context.Context, ln net.Listener, cfg Config) error {
+	return serve(ctx, ln, cfg, handleHTTPConnectClient)
+}
+
+func serve(ctx context.Context, ln net.Listener, cfg Config, handle func(context.Context, net.Conn, Dialer, Config) error) error {
+	cfg, dialer, err := prepare(cfg)
+	if err != nil {
+		return err
 	}
 
 	errc := make(chan error, 1)
@@ -56,42 +67,106 @@ func Serve(ctx context.Context, ln net.Listener, cfg Config) error {
 				return
 			}
 			go func() {
-				_ = handleClient(ctx, conn, cfg)
+				_ = handle(ctx, conn, dialer, cfg)
 			}()
 		}
 	}()
 
-	err := <-errc
+	err = <-errc
 	if ctx.Err() != nil {
 		return nil
 	}
 	return err
 }
 
-func handleClient(parent context.Context, client net.Conn, cfg Config) error {
-	defer client.Close()
-	target, err := negotiate(client)
-	if err != nil {
-		return err
+func prepare(cfg Config) (Config, Dialer, error) {
+	cfg = cfg.withDefaults()
+	if cfg.WorkerURL == "" {
+		return Config{}, nil, errors.New("worker URL is required")
 	}
-
-	dialCtx, cancel := context.WithTimeout(parent, cfg.DialTimeout)
-	defer cancel()
-
-	remote, err := (&cfsocks.Client{
+	if cfg.AuthSecret == "" {
+		return Config{}, nil, errors.New("auth secret is required")
+	}
+	return cfg, &cfsocks.Client{
 		Endpoint:          cfg.WorkerURL,
 		Secret:            cfg.AuthSecret,
 		Transport:         cfsocks.TransportWSS,
 		HTTPClient:        cfg.HTTPClient,
 		InsecureAllowHTTP: cfg.InsecureAllowHTTP,
-	}).Dial(dialCtx, "tcp", net.JoinHostPort(target.Host, strconv.Itoa(target.Port)))
+	}, nil
+}
+
+func handleSOCKSClient(parent context.Context, client net.Conn, dialer Dialer, cfg Config) error {
+	defer client.Close()
+	target, err := negotiate(client)
 	if err != nil {
-		_ = writeReply(client, 0x01)
 		return err
 	}
-	defer remote.Close()
-	if err := writeReply(client, 0x00); err != nil {
+	targetAddress := net.JoinHostPort(target.Host, strconv.Itoa(target.Port))
+	return proxy(parent, client, nil, dialer, cfg, targetAddress, func(err error) error {
+		if err != nil {
+			return writeReply(client, 0x01)
+		}
+		return writeReply(client, 0x00)
+	})
+}
+
+func handleHTTPConnectClient(parent context.Context, client net.Conn, dialer Dialer, cfg Config) error {
+	defer client.Close()
+	reader := bufio.NewReader(client)
+	req, err := http.ReadRequest(reader)
+	if err != nil {
 		return err
+	}
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if req.Method != http.MethodConnect {
+		_, _ = io.WriteString(client, "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n")
+		return fmt.Errorf("unsupported HTTP proxy method %s", req.Method)
+	}
+	targetAddress := req.RequestURI
+	if targetAddress == "" {
+		targetAddress = req.Host
+	}
+	if _, _, err := cfsocks.SplitHostPort(targetAddress); err != nil {
+		_, _ = io.WriteString(client, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+		return err
+	}
+	return proxy(parent, client, reader, dialer, cfg, targetAddress, func(err error) error {
+		if err != nil {
+			_, writeErr := io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+			return writeErr
+		}
+		_, writeErr := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		return writeErr
+	})
+}
+
+func proxy(parent context.Context, client net.Conn, buffered *bufio.Reader, dialer Dialer, cfg Config, targetAddress string, reply func(error) error) error {
+	dialCtx, cancel := context.WithTimeout(parent, cfg.DialTimeout)
+	defer cancel()
+
+	remote, err := dialer.Dial(dialCtx, "tcp", targetAddress)
+	replyErr := reply(err)
+	if err != nil {
+		return err
+	}
+	if replyErr != nil {
+		_ = remote.Close()
+		return replyErr
+	}
+	defer remote.Close()
+
+	var activity chan struct{}
+	if cfg.IdleTimeout > 0 {
+		activity = make(chan struct{}, 1)
+	}
+	if buffered != nil && buffered.Buffered() > 0 {
+		if err := writeBuffered(remote, buffered); err != nil {
+			return err
+		}
+		notifyActivity(activity)
 	}
 
 	relayCtx, stop := context.WithCancel(parent)
@@ -103,9 +178,7 @@ func handleClient(parent context.Context, client net.Conn, cfg Config) error {
 			_ = remote.Close()
 		})
 	}
-	var activity chan struct{}
 	if cfg.IdleTimeout > 0 {
-		activity = make(chan struct{}, 1)
 		go monitorIdle(relayCtx, cfg.IdleTimeout, activity, func() {
 			stop()
 			closeBoth()
@@ -123,6 +196,20 @@ func handleClient(parent context.Context, client net.Conn, cfg Config) error {
 	closeBoth()
 	<-errc
 	return err
+}
+
+func writeBuffered(dst net.Conn, src *bufio.Reader) error {
+	for src.Buffered() > 0 {
+		data, err := src.Peek(src.Buffered())
+		if err != nil {
+			return err
+		}
+		if err := writeAll(dst, data); err != nil {
+			return err
+		}
+		_, _ = src.Discard(len(data))
+	}
+	return nil
 }
 
 type targetAddr struct {

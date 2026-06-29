@@ -50,6 +50,9 @@ url_encode_path_segment() {
       [a-zA-Z0-9.~_-])
         output+="$char"
         ;;
+      :)
+        output+="$char"
+        ;;
       *)
         printf -v encoded '%%%02X' "'$char"
         output+="$encoded"

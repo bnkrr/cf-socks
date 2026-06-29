@@ -145,6 +145,24 @@ Then configure applications to use:
 socks5h://127.0.0.1:1080
 ```
 
+For clients that expect an HTTP proxy, such as Docker daemon setups, also enable the HTTP CONNECT listener:
+
+```bash
+./cf-socks-agent \
+  -listen 127.0.0.1:1080 \
+  -http-listen 127.0.0.1:3128 \
+  -worker-url https://<your-worker-host> \
+  -auth-secret "$CF_SOCKS_AUTH_SECRET"
+```
+
+Then configure those clients to use:
+
+```text
+http://127.0.0.1:3128
+```
+
+The HTTP CONNECT listener only adapts the local proxy handshake. After a successful `CONNECT host:port`, bytes are relayed through the same WSS `Dial` path as SOCKS5.
+
 The agent closes idle proxied connections after 5 minutes by default. Use `-idle-timeout -1` to disable the idle timeout.
 
 ## Verify
@@ -165,6 +183,12 @@ Check the observed outbound IP through the proxy:
 
 ```bash
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
+```
+
+Test the HTTP CONNECT listener:
+
+```bash
+curl -x http://127.0.0.1:3128 https://ifconfig.me/ip
 ```
 
 You can also verify bounded TCP payloads without installing the agent or SDK by using the Direct endpoint:

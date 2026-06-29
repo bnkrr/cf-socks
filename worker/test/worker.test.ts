@@ -247,6 +247,37 @@ describe("worker endpoints", () => {
     );
   });
 
+  it("/direct accepts readable IPv6 target host", async () => {
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("ipv6-response"));
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>(),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/direct/::1/443", {
+        method: "POST",
+        headers: { authorization: "Bearer direct-secret" },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("ipv6-response");
+    expect(mocks.connect).toHaveBeenCalledWith(
+      { hostname: "::1", port: 443 },
+      { secureTransport: "off", allowHalfOpen: true },
+    );
+  });
+
   it("/direct rejects malformed target paths before connect", async () => {
     const cases = [
       "https://worker.test/direct/example.test/0",

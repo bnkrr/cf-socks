@@ -15,6 +15,7 @@ import (
 
 func main() {
 	listen := flag.String("listen", env("CF_SOCKS_LISTEN", "127.0.0.1:1080"), "local SOCKS5 listen address")
+	httpListen := flag.String("http-listen", env("CF_SOCKS_HTTP_LISTEN", ""), "local HTTP CONNECT proxy listen address; empty disables it")
 	workerURL := flag.String("worker-url", env("CF_SOCKS_WORKER_URL", ""), "Worker endpoint URL, for example https://name.workers.dev")
 	authSecret := flag.String("auth-secret", env("CF_SOCKS_AUTH_SECRET", ""), "secret used for Worker encrypted bearer-token authentication")
 	dialTimeout := flag.Duration("dial-timeout", durationEnv("CF_SOCKS_DIAL_TIMEOUT", 15*time.Second), "Worker/target dial timeout")
@@ -26,26 +27,62 @@ func main() {
 		fmt.Fprintln(os.Stderr, "worker-url and auth-secret are required")
 		os.Exit(2)
 	}
-
-	ln, err := net.Listen("tcp", *listen)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if *listen == "" && *httpListen == "" {
+		fmt.Fprintln(os.Stderr, "at least one of listen or http-listen must be set")
+		os.Exit(2)
 	}
-	fmt.Fprintf(os.Stderr, "cf-socks-agent listening on %s\n", ln.Addr())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	if err := socksagent.Serve(ctx, ln, socksagent.Config{
+	cfg := socksagent.Config{
 		WorkerURL:         *workerURL,
 		AuthSecret:        *authSecret,
 		DialTimeout:       *dialTimeout,
 		IdleTimeout:       *idleTimeout,
 		InsecureAllowHTTP: *insecureAllowHTTP,
-	}); err != nil {
+	}
+	errc := make(chan error, 2)
+	listeners := 0
+
+	if *listen != "" {
+		ln, err := net.Listen("tcp", *listen)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		listeners++
+		fmt.Fprintf(os.Stderr, "cf-socks-agent SOCKS5 listening on %s\n", ln.Addr())
+		go func() {
+			errc <- socksagent.Serve(ctx, ln, cfg)
+		}()
+	}
+	if *httpListen != "" {
+		ln, err := net.Listen("tcp", *httpListen)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		listeners++
+		fmt.Fprintf(os.Stderr, "cf-socks-agent HTTP CONNECT listening on %s\n", ln.Addr())
+		go func() {
+			errc <- socksagent.ServeHTTPConnect(ctx, ln, cfg)
+		}()
+	}
+
+	err := <-errc
+	cancel()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	for i := 1; i < listeners; i++ {
+		if err := <-errc; err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 }
 

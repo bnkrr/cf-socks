@@ -145,6 +145,24 @@ go build -o cf-socks-agent ./cmd/cf-socks-agent
 socks5h://127.0.0.1:1080
 ```
 
+对于 Docker daemon 这类期望 HTTP proxy 的客户端，也可以开启 HTTP CONNECT 入口：
+
+```bash
+./cf-socks-agent \
+  -listen 127.0.0.1:1080 \
+  -http-listen 127.0.0.1:3128 \
+  -worker-url https://<your-worker-host> \
+  -auth-secret "$CF_SOCKS_AUTH_SECRET"
+```
+
+然后把这些客户端配置为使用：
+
+```text
+http://127.0.0.1:3128
+```
+
+HTTP CONNECT 入口只负责适配本地代理握手。`CONNECT host:port` 成功后，后续字节会走和 SOCKS5 相同的 WSS `Dial` 数据路径。
+
 agent 默认会在连接空闲 5 分钟后关闭代理连接。使用 `-idle-timeout -1` 可以禁用 idle timeout。
 
 ## 验证
@@ -165,6 +183,12 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/
 
 ```bash
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me/ip
+```
+
+测试 HTTP CONNECT 入口：
+
+```bash
+curl -x http://127.0.0.1:3128 https://ifconfig.me/ip
 ```
 
 也可以不安装 agent 或 SDK，直接用 Direct endpoint 验证 bounded TCP payload：
