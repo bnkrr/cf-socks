@@ -79,12 +79,12 @@ func NewClientPool(cfg ClientPoolConfig) (*ClientPool, error) {
 	return &ClientPool{clients: clients, owned: owned}, nil
 }
 
-func (p *ClientPool) Do(ctx context.Context, network, address string, payload io.Reader) (*Response, error) {
+func (p *ClientPool) Do(ctx context.Context, network, address string, payload io.Reader, options ...DoOption) (*Response, error) {
 	if p == nil || len(p.clients) == 0 {
 		return nil, errors.New("client pool is not initialized")
 	}
 	idx := p.next.Add(1) - 1
-	return p.clients[idx%uint64(len(p.clients))].Do(ctx, network, address, payload)
+	return p.clients[idx%uint64(len(p.clients))].Do(ctx, network, address, payload, options...)
 }
 
 func (p *ClientPool) Close() error {

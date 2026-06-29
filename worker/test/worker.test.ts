@@ -67,6 +67,40 @@ describe("worker endpoints", () => {
     expect(mocks.connect).not.toHaveBeenCalled();
   });
 
+  it("/__meta rejects invalid direct bearer", async () => {
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/__meta", {
+        headers: { authorization: "Bearer wrong" },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
+  it("/__meta returns authenticated capabilities", async () => {
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/__meta", {
+        headers: { authorization: "Bearer direct-secret" },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const meta = (await response.json()) as { name: string; protocol: number; capabilities: string[] };
+    expect(meta.name).toBe("cf-socks");
+    expect(meta.protocol).toBe(2);
+    expect(meta.capabilities).toContain("write_close_after");
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
   it("/wss rejects valid auth without websocket upgrade", async () => {
     const ctx = executionContext();
     const auth = await bearer("secret", "GET", "/wss", {
@@ -177,6 +211,69 @@ describe("worker endpoints", () => {
     expect(new TextDecoder().decode(written[0])).toBe("h3-client-payload");
   });
 
+  it("/h2 closes target writable when token requests write_close_after", async () => {
+    const closed = vi.fn();
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>({
+        close() {
+          closed();
+        },
+      }),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const auth = await bearer("secret", "POST", "/h2", {
+      op: "payload",
+      host: "example.test",
+      port: 80,
+      ts: Math.floor(Date.now() / 1000),
+      write_close_after_ms: 0,
+    });
+    const response = await worker.fetch(
+      new Request("https://worker.test/h2", {
+        method: "POST",
+        headers: { authorization: auth },
+        body: "client-payload",
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    await Promise.all(ctx.promises);
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("/h2 rejects oversized write_close_after token claim", async () => {
+    const ctx = executionContext();
+    const auth = await bearer("secret", "POST", "/h2", {
+      op: "payload",
+      host: "example.test",
+      port: 80,
+      ts: Math.floor(Date.now() / 1000),
+      write_close_after_ms: 600_001,
+    });
+    const response = await worker.fetch(
+      new Request("https://worker.test/h2", {
+        method: "POST",
+        headers: { authorization: auth },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
   it("/direct accepts static bearer and target URL", async () => {
     const written: Uint8Array[] = [];
     mocks.connect.mockReturnValue({
@@ -214,6 +311,88 @@ describe("worker endpoints", () => {
       { secureTransport: "off", allowHalfOpen: true },
     );
     expect(new TextDecoder().decode(written[0])).toBe("direct-client-payload");
+  });
+
+  it("/direct closes target writable from write_close_after query", async () => {
+    const closed = vi.fn();
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>({
+        close() {
+          closed();
+        },
+      }),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/direct/example.test/80?write_close_after=0", {
+        method: "POST",
+        headers: { authorization: "Bearer direct-secret" },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    await Promise.all(ctx.promises);
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("/direct treats write_close_after=none as disabled", async () => {
+    const closed = vi.fn();
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>({
+        close() {
+          closed();
+        },
+      }),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/direct/example.test/80?write_close_after=none", {
+        method: "POST",
+        headers: { authorization: "Bearer direct-secret" },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    await Promise.all(ctx.promises);
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("/direct rejects malformed write_close_after values before connect", async () => {
+    for (const value of ["", "-1ms", "1", "1h", "11m", "600001ms", "abc"]) {
+      const ctx = executionContext();
+      const response = await worker.fetch(
+        new Request(`https://worker.test/direct/example.test/80?write_close_after=${encodeURIComponent(value)}`, {
+          method: "POST",
+          headers: { authorization: "Bearer direct-secret" },
+        }),
+        env(),
+        ctx,
+      );
+
+      expect(response.status, value).toBe(404);
+      expect(await response.text(), value).toBe("");
+    }
+    expect(mocks.connect).not.toHaveBeenCalled();
   });
 
   it("/direct accepts percent-encoded IPv6 target host", async () => {
@@ -457,7 +636,7 @@ async function bearer(
   secret: string,
   method: string,
   path: string,
-  claims: { op: "dial" | "payload"; host: string; port: number; ts: number },
+  claims: { op: "dial" | "payload"; host: string; port: number; ts: number; write_close_after_ms?: number },
 ): Promise<string> {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const key = await aesKey(secret);

@@ -4,6 +4,7 @@
 var VERSION = 2;
 var KEY_PREFIX = "cf-socks auth v2\n";
 var DEFAULT_WINDOW_SECONDS = 120;
+var MAX_WRITE_CLOSE_AFTER_MS = 6e5;
 var NonceCache = class {
   constructor(maxEntries = 4096) {
     this.maxEntries = maxEntries;
@@ -98,12 +99,19 @@ function parseClaims(input) {
   if (candidate.op !== "dial" && candidate.op !== "payload" || typeof candidate.host !== "string" || !isValidHost(candidate.host) || typeof candidate.port !== "number" || !Number.isInteger(candidate.port) || candidate.port < 1 || candidate.port > 65535 || typeof candidate.ts !== "number" || !Number.isInteger(candidate.ts)) {
     return null;
   }
-  return {
+  const claims = {
     op: candidate.op,
     host: candidate.host,
     port: candidate.port,
     ts: candidate.ts
   };
+  if ("write_close_after_ms" in candidate) {
+    if (typeof candidate.write_close_after_ms !== "number" || !Number.isInteger(candidate.write_close_after_ms) || candidate.write_close_after_ms < 0 || candidate.write_close_after_ms > MAX_WRITE_CLOSE_AFTER_MS) {
+      return null;
+    }
+    claims.write_close_after_ms = candidate.write_close_after_ms;
+  }
+  return claims;
 }
 function isValidHost(host) {
   return host.length > 0 && host.length <= 253 && !host.includes("\n") && !host.includes("\r");
@@ -138,6 +146,13 @@ function toArrayBuffer(bytes) {
 
 // worker/src/route.ts
 var nonceCache = new NonceCache();
+var MAX_WRITE_CLOSE_AFTER_MS2 = 6e5;
+var WORKER_META = {
+  name: "cf-socks",
+  version: "0.5.0",
+  protocol: 2,
+  capabilities: ["wss", "h2", "h3", "direct", "write_close_after"]
+};
 async function resolveRoute(request, env, transport) {
   const url = new URL(request.url);
   const expectedOp = transport === "wss" ? "dial" : "payload";
@@ -168,7 +183,8 @@ async function resolveRoute(request, env, transport) {
     op: claims.op,
     target: { host: claims.host, port: claims.port },
     transport,
-    path: url.pathname
+    path: url.pathname,
+    payloadOptions: transport === "payload" && claims.write_close_after_ms !== void 0 ? { writeCloseAfterMs: claims.write_close_after_ms } : void 0
   };
 }
 function resolveDirectRoute(request, env) {
@@ -183,12 +199,27 @@ function resolveDirectRoute(request, env) {
   if (!target) {
     return null;
   }
+  const payloadOptions = parseDirectPayloadOptions(url);
+  if (!payloadOptions) {
+    return null;
+  }
   return {
     op: "payload",
     target,
     transport: "payload",
-    path: url.pathname
+    path: url.pathname,
+    payloadOptions
   };
+}
+function resolveMetaRoute(request, env) {
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.pathname !== "/__meta") {
+    return null;
+  }
+  if (!env.DIRECT_BEARER || !verifyStaticBearer(request.headers.get("Authorization"), env.DIRECT_BEARER)) {
+    return null;
+  }
+  return WORKER_META;
 }
 function parseDirectTarget(pathname) {
   const parts = pathname.split("/");
@@ -214,6 +245,28 @@ function verifyStaticBearer(header, expected) {
   }
   const actual = header.slice(prefix.length);
   return actual.length === expected.length && constantTimeEqual(actual, expected);
+}
+function parseDirectPayloadOptions(url) {
+  const value = url.searchParams.get("write_close_after");
+  if (value === null || value === "none") {
+    return {};
+  }
+  const ms = parseDurationMs(value);
+  return ms === null ? null : { writeCloseAfterMs: ms };
+}
+function parseDurationMs(value) {
+  if (value === "0") {
+    return 0;
+  }
+  const match = /^([1-9][0-9]*)(ms|s|m)$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2];
+  const multiplier = unit === "ms" ? 1 : unit === "s" ? 1e3 : 6e4;
+  const ms = amount * multiplier;
+  return Number.isSafeInteger(ms) && ms <= MAX_WRITE_CLOSE_AFTER_MS2 ? ms : null;
 }
 function constantTimeEqual(a, b) {
   let diff = a.length ^ b.length;
@@ -247,7 +300,7 @@ async function runWssTunnel(ws, target) {
   session.send("OK\n");
   await relayDone;
 }
-async function runPayloadExchange(request, target, ctx) {
+async function runPayloadExchange(request, target, ctx, options = {}) {
   let socket;
   try {
     socket = await connectTarget(target, "payload");
@@ -255,7 +308,7 @@ async function runPayloadExchange(request, target, ctx) {
     return null;
   }
   ctx.waitUntil(
-    pipeRequestToSocket(request, socket).catch(() => {
+    pipeRequestToSocket(request, socket, options).catch(() => {
       void socket.close().catch(() => void 0);
     })
   );
@@ -346,26 +399,37 @@ async function binaryMessageBytes(data) {
   }
   throw new TypeError("unsupported binary message");
 }
-async function pipeRequestToSocket(request, socket) {
-  if (!request.body) {
-    return;
-  }
-  const reader = request.body.getReader();
+async function pipeRequestToSocket(request, socket, options) {
   const writer = socket.writable.getWriter();
   try {
-    for (; ; ) {
-      const { value, done } = await reader.read();
-      if (done) {
-        return;
+    if (request.body) {
+      const reader = request.body.getReader();
+      try {
+        for (; ; ) {
+          const { value, done } = await reader.read();
+          if (done) {
+            break;
+          }
+          if (value) {
+            await writer.write(value);
+          }
+        }
+      } finally {
+        reader.releaseLock();
       }
-      if (value) {
-        await writer.write(value);
+    }
+    if (options.writeCloseAfterMs !== void 0) {
+      if (options.writeCloseAfterMs > 0) {
+        await sleep(options.writeCloseAfterMs);
       }
+      await writer.close();
     }
   } finally {
     writer.releaseLock();
-    reader.releaseLock();
   }
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function safeSend(ws, data) {
   try {
@@ -388,6 +452,9 @@ var index_default = {
     }
     if (url.pathname.startsWith("/direct/")) {
       return handleDirect(request, env, ctx);
+    }
+    if (url.pathname === "/__meta") {
+      return handleMeta(request, env);
     }
     return notFound();
   }
@@ -412,7 +479,7 @@ async function handlePayload(request, env, ctx) {
   if (!route) {
     return notFound();
   }
-  const response = await runPayloadExchange(request, route.target, ctx);
+  const response = await runPayloadExchange(request, route.target, ctx, route.payloadOptions);
   if (!response) {
     return new Response(null, { status: 502 });
   }
@@ -423,11 +490,22 @@ async function handleDirect(request, env, ctx) {
   if (!route) {
     return notFound();
   }
-  const response = await runPayloadExchange(request, route.target, ctx);
+  const response = await runPayloadExchange(request, route.target, ctx, route.payloadOptions);
   if (!response) {
     return new Response(null, { status: 502 });
   }
   return response;
+}
+function handleMeta(request, env) {
+  const meta = resolveMetaRoute(request, env);
+  if (!meta) {
+    return notFound();
+  }
+  return Response.json(meta, {
+    headers: {
+      "cache-control": "no-store"
+    }
+  });
 }
 function notFound() {
   return new Response(null, { status: 404 });

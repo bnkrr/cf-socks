@@ -1,5 +1,5 @@
 import { connect } from "cloudflare:sockets";
-import { Target } from "./route";
+import { PayloadOptions, Target } from "./route";
 
 type WorkerSocket = ReturnType<typeof connect>;
 type ConnectMode = "wss" | "payload";
@@ -31,6 +31,7 @@ export async function runPayloadExchange(
   request: Request,
   target: Target,
   ctx: ExecutionContext,
+  options: PayloadOptions = {},
 ): Promise<Response | null> {
   let socket: WorkerSocket;
   try {
@@ -40,7 +41,7 @@ export async function runPayloadExchange(
   }
 
   ctx.waitUntil(
-    pipeRequestToSocket(request, socket).catch(() => {
+    pipeRequestToSocket(request, socket, options).catch(() => {
       void socket.close().catch(() => undefined);
     }),
   );
@@ -144,28 +145,38 @@ async function binaryMessageBytes(data: unknown): Promise<Uint8Array> {
   throw new TypeError("unsupported binary message");
 }
 
-async function pipeRequestToSocket(request: Request, socket: WorkerSocket): Promise<void> {
-  if (!request.body) {
-    return;
-  }
-  const reader = request.body.getReader();
+async function pipeRequestToSocket(request: Request, socket: WorkerSocket, options: PayloadOptions): Promise<void> {
   const writer = socket.writable.getWriter();
   try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) {
-        return;
-      }
-      if (value) {
-        await writer.write(value);
+    if (request.body) {
+      const reader = request.body.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) {
+            break;
+          }
+          if (value) {
+            await writer.write(value);
+          }
+        }
+      } finally {
+        reader.releaseLock();
       }
     }
+    if (options.writeCloseAfterMs !== undefined) {
+      if (options.writeCloseAfterMs > 0) {
+        await sleep(options.writeCloseAfterMs);
+      }
+      await writer.close();
+    }
   } finally {
-    // Do not close socket.writable here. On Workers connect(), closing the writable side
-    // also ends the readable response path in practice, which breaks Do response streaming.
     writer.releaseLock();
-    reader.releaseLock();
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function safeSend(ws: WebSocket, data: string | Uint8Array): void {

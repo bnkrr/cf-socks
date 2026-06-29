@@ -105,7 +105,7 @@ func buildRunner(cfg config) (runner, func(), error) {
 }
 
 type doer interface {
-	Do(context.Context, string, string, io.Reader) (*cfsocks.Response, error)
+	Do(context.Context, string, string, io.Reader, ...cfsocks.DoOption) (*cfsocks.Response, error)
 }
 
 func doRunner(cfg config, client doer) runner {

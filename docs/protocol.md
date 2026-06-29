@@ -54,6 +54,9 @@ Creates one bounded payload exchange over HTTP/2.
 - Target `host` and `port` are read from encrypted token claims.
 - Request body bytes are copied to target writable.
 - Target readable bytes are streamed as response body.
+- Optional encrypted claim `write_close_after_ms` closes the target writable
+  side after request-body EOF and the configured delay. Valid range is
+  `0..600000` milliseconds.
 
 ### `POST /h3`
 
@@ -72,7 +75,31 @@ Creates one bounded payload exchange over the client's selected HTTP transport.
 - Target `host` and `port` are read from the URL path.
 - Request body bytes are copied to target writable.
 - Target readable bytes are streamed as response body.
+- Optional query `write_close_after=0|none|<N>ms|<N>s|<N>m` closes the target
+  writable side after request-body EOF and the configured delay. `none` is the
+  same as omitting the query. Maximum delay is `600s`/`10m`; use the default
+  disabled behavior for longer-lived responses.
 - This endpoint is not used by the Go SDK or local SOCKS agent.
+
+### `GET /__meta`
+
+Returns authenticated Worker metadata for smoke tests and deployment checks.
+
+- Requires `DIRECT_BEARER` to be configured on the Worker.
+- Requires `Authorization: Bearer <DIRECT_BEARER>`.
+- Does not open any target TCP connection.
+- Returns empty `404` on missing or invalid auth.
+
+Example response:
+
+```json
+{
+  "name": "cf-socks",
+  "version": "0.5.0",
+  "protocol": 2,
+  "capabilities": ["wss", "h2", "h3", "direct", "write_close_after"]
+}
+```
 
 ## Authentication Token
 
@@ -104,11 +131,15 @@ Plaintext claims:
   "op": "dial",
   "host": "example.com",
   "port": 443,
-  "ts": 1234567890
+  "ts": 1234567890,
+  "write_close_after_ms": 200
 }
 ```
 
 Currently, `op` is `"dial"` for `/wss` and `"payload"` for `/h2` and `/h3`.
+`write_close_after_ms` is optional and only meaningful for payload exchanges.
+The field must be absent to disable write close; if present, it must be an
+integer in `0..600000`.
 
 Key derivation:
 
@@ -203,7 +234,7 @@ socket = connect(
 );
 await socket.opened;
 
-ctx.waitUntil(copy(request.body, socket.writable));
+ctx.waitUntil(copy(request.body, socket.writable, route.payloadOptions));
 return new Response(socket.readable);
 ```
 
@@ -218,9 +249,12 @@ simultaneously-open, full-duplex TCP socket in our Workers tests. A WebSocket
 upgrade exposes a different Worker API and did behave like the needed
 bidirectional channel.
 
-The Worker does not close `socket.writable` after the request body is consumed,
-because in Workers this can also terminate the readable response path in
-practice and break response streaming.
+By default, the Worker does not close `socket.writable` after the request body
+is consumed, because immediate writable close can terminate the readable
+response path in practice and break response streaming. For one-shot exchanges,
+the client may request `write_close_after_ms` so the Worker waits for that delay
+after request-body EOF and then closes the target writable side while continuing
+to stream `socket.readable`.
 
 This is why H2/H3 is modeled as `Do`, not `Dial`: it is good for bounded payloads
 and server-first reads, but it is not a general interactive TCP connection.

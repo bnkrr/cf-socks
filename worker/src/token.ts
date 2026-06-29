@@ -1,12 +1,14 @@
 const VERSION = 0x02;
 const KEY_PREFIX = "cf-socks auth v2\n";
 const DEFAULT_WINDOW_SECONDS = 120;
+const MAX_WRITE_CLOSE_AFTER_MS = 600_000;
 
 export interface Claims {
   op: "dial" | "payload";
   host: string;
   port: number;
   ts: number;
+  write_close_after_ms?: number;
 }
 
 export class NonceCache {
@@ -128,12 +130,24 @@ function parseClaims(input: string): Claims | null {
   ) {
     return null;
   }
-  return {
+  const claims: Claims = {
     op: candidate.op,
     host: candidate.host,
     port: candidate.port,
     ts: candidate.ts,
   };
+  if ("write_close_after_ms" in candidate) {
+    if (
+      typeof candidate.write_close_after_ms !== "number" ||
+      !Number.isInteger(candidate.write_close_after_ms) ||
+      candidate.write_close_after_ms < 0 ||
+      candidate.write_close_after_ms > MAX_WRITE_CLOSE_AFTER_MS
+    ) {
+      return null;
+    }
+    claims.write_close_after_ms = candidate.write_close_after_ms;
+  }
+  return claims;
 }
 
 function isValidHost(host: string): boolean {

@@ -21,7 +21,7 @@ func main() {
 	client := cfsocks.Client{Endpoint: endpoint, Secret: secret, Transport: cfsocks.TransportH2}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	resp, err := client.Do(ctx, "tcp", "github.com:22", nil)
+	resp, err := client.Do(ctx, "tcp", "github.com:22", nil, cfsocks.WithWriteCloseAfter(500*time.Millisecond))
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -325,6 +325,48 @@ func TestClientDoPayloadThroughH2(t *testing.T) {
 	}
 }
 
+func TestClientDoIncludesWriteCloseAfterClaim(t *testing.T) {
+	const secret = "test-secret"
+	worker := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, err := token.Open(secret, token.AAD(r.Method, r.URL.Path), bearer(t, r), token.OpenOptions{Now: time.Now()})
+		if err != nil {
+			t.Errorf("open token: %v", err)
+			http.NotFound(w, r)
+			return
+		}
+		if claims.WriteCloseAfterMS == nil || *claims.WriteCloseAfterMS != 200 {
+			t.Errorf("write_close_after_ms = %v, want 200", claims.WriteCloseAfterMS)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	worker.EnableHTTP2 = true
+	worker.StartTLS()
+	defer worker.Close()
+
+	client := Client{Endpoint: worker.URL, Secret: secret, Transport: TransportH2, HTTPClient: worker.Client()}
+	resp, err := client.Do(context.Background(), "tcp", "example.test:80", nil, WithWriteCloseAfter(200*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+}
+
+func TestClientDoRejectsNegativeWriteCloseAfter(t *testing.T) {
+	client := Client{Endpoint: "https://worker.test", Secret: "secret", Transport: TransportH2}
+	_, err := client.Do(context.Background(), "tcp", "example.test:80", nil, WithWriteCloseAfter(-time.Millisecond))
+	if err == nil {
+		t.Fatal("expected negative write_close_after error")
+	}
+}
+
+func TestClientDoRejectsTooLargeWriteCloseAfter(t *testing.T) {
+	client := Client{Endpoint: "https://worker.test", Secret: "secret", Transport: TransportH2}
+	_, err := client.Do(context.Background(), "tcp", "example.test:80", nil, WithWriteCloseAfter(MaxWriteCloseAfter+time.Millisecond))
+	if err == nil {
+		t.Fatal("expected oversized write_close_after error")
+	}
+}
+
 func TestClientDoPayloadThroughH3(t *testing.T) {
 	const secret = "test-secret"
 	client := h3TestClient(t, secret, "payload", "h3-response")

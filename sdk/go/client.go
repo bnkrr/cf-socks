@@ -76,10 +76,14 @@ func (c *Client) Dial(ctx context.Context, network, address string) (net.Conn, e
 	return newWSConn(connCtx, cancel, ws, address), nil
 }
 
-func (c *Client) Do(ctx context.Context, network, address string, payload io.Reader) (*Response, error) {
+func (c *Client) Do(ctx context.Context, network, address string, payload io.Reader, options ...DoOption) (*Response, error) {
 	transport := c.transport()
 	if transport != TransportH2 && transport != TransportH3 {
 		return nil, ErrUnsupportedTransport
+	}
+	doOptions, err := applyDoOptions(options)
+	if err != nil {
+		return nil, err
 	}
 	path := "/h2"
 	expectedProtoMajor := 2
@@ -88,10 +92,11 @@ func (c *Client) Do(ctx context.Context, network, address string, payload io.Rea
 		expectedProtoMajor = 3
 	}
 	route, err := c.buildRoute(network, address, routeSpec{
-		method: http.MethodPost,
-		path:   path,
-		op:     "payload",
-		ws:     false,
+		method:  http.MethodPost,
+		path:    path,
+		op:      "payload",
+		ws:      false,
+		options: doOptions,
 	})
 	if err != nil {
 		return nil, err

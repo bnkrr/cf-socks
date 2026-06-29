@@ -9,7 +9,8 @@ import (
 
 func TestSealOpen(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	claims := Claims{Op: "dial", Host: "example.test", Port: 443}
+	writeCloseAfterMS := int64(200)
+	claims := Claims{Op: "dial", Host: "example.test", Port: 443, WriteCloseAfterMS: &writeCloseAfterMS}
 	sealed, err := Seal("secret", AAD("GET", "/wss"), claims, now)
 	if err != nil {
 		t.Fatal(err)
@@ -20,6 +21,9 @@ func TestSealOpen(t *testing.T) {
 	}
 	if opened.Op != "dial" || opened.Host != "example.test" || opened.Port != 443 || opened.TS != now.Unix() {
 		t.Fatalf("claims = %+v", opened)
+	}
+	if opened.WriteCloseAfterMS == nil || *opened.WriteCloseAfterMS != writeCloseAfterMS {
+		t.Fatalf("write_close_after_ms = %v, want %d", opened.WriteCloseAfterMS, writeCloseAfterMS)
 	}
 }
 
@@ -61,6 +65,14 @@ func TestSealRejectsMalformedClaims(t *testing.T) {
 	}
 	if _, err := Seal("secret", AAD("GET", "/wss"), Claims{Op: "other", Host: "example.test", Port: 443}, time.Now()); err == nil {
 		t.Fatal("expected bad op")
+	}
+	writeCloseAfterMS := int64(-1)
+	if _, err := Seal("secret", AAD("POST", "/h2"), Claims{Op: "payload", Host: "example.test", Port: 443, WriteCloseAfterMS: &writeCloseAfterMS}, time.Now()); err == nil {
+		t.Fatal("expected bad write_close_after_ms")
+	}
+	writeCloseAfterMS = MaxWriteCloseAfter.Milliseconds() + 1
+	if _, err := Seal("secret", AAD("POST", "/h2"), Claims{Op: "payload", Host: "example.test", Port: 443, WriteCloseAfterMS: &writeCloseAfterMS}, time.Now()); err == nil {
+		t.Fatal("expected oversized write_close_after_ms")
 	}
 }
 

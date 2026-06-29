@@ -159,7 +159,13 @@ func TestRealH2NilPayloadTCPBanner(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := client.Do(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)), nil)
+	resp, err := client.Do(
+		ctx,
+		"tcp",
+		net.JoinHostPort(host, fmt.Sprint(port)),
+		nil,
+		cfsocks.WithWriteCloseAfter(500*time.Millisecond),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +228,13 @@ func TestRealH3NilPayloadTCPBanner(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := client.Do(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)), nil)
+	resp, err := client.Do(
+		ctx,
+		"tcp",
+		net.JoinHostPort(host, fmt.Sprint(port)),
+		nil,
+		cfsocks.WithWriteCloseAfter(500*time.Millisecond),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

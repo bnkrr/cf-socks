@@ -37,11 +37,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	return &Client{client: client, transport: transport}, nil
 }
 
-func (c *Client) Do(ctx context.Context, network, address string, payload io.Reader) (*cfsocks.Response, error) {
+func (c *Client) Do(ctx context.Context, network, address string, payload io.Reader, options ...cfsocks.DoOption) (*cfsocks.Response, error) {
 	if c == nil || c.client == nil {
 		return nil, errors.New("h3 client is not initialized")
 	}
-	return c.client.Do(ctx, network, address, payload)
+	return c.client.Do(ctx, network, address, payload, options...)
 }
 
 func (c *Client) Close() error {
@@ -102,11 +102,11 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	return &Pool{pool: pool, transports: transports}, nil
 }
 
-func (p *Pool) Do(ctx context.Context, network, address string, payload io.Reader) (*cfsocks.Response, error) {
+func (p *Pool) Do(ctx context.Context, network, address string, payload io.Reader, options ...cfsocks.DoOption) (*cfsocks.Response, error) {
 	if p == nil || p.pool == nil {
 		return nil, errors.New("h3 pool is not initialized")
 	}
-	return p.pool.Do(ctx, network, address, payload)
+	return p.pool.Do(ctx, network, address, payload, options...)
 }
 
 func (p *Pool) Close() error {

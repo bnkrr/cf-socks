@@ -1,4 +1,4 @@
-import { Env, resolveDirectRoute, resolveRoute } from "./route";
+import { Env, resolveDirectRoute, resolveMetaRoute, resolveRoute } from "./route";
 import { runPayloadExchange, runWssTunnel } from "./tunnel";
 
 export default {
@@ -13,6 +13,9 @@ export default {
     }
     if (url.pathname.startsWith("/direct/")) {
       return handleDirect(request, env, ctx);
+    }
+    if (url.pathname === "/__meta") {
+      return handleMeta(request, env);
     }
     return notFound();
   },
@@ -40,7 +43,7 @@ async function handlePayload(request: Request, env: Env, ctx: ExecutionContext):
   if (!route) {
     return notFound();
   }
-  const response = await runPayloadExchange(request, route.target, ctx);
+  const response = await runPayloadExchange(request, route.target, ctx, route.payloadOptions);
   if (!response) {
     return new Response(null, { status: 502 });
   }
@@ -52,11 +55,23 @@ async function handleDirect(request: Request, env: Env, ctx: ExecutionContext): 
   if (!route) {
     return notFound();
   }
-  const response = await runPayloadExchange(request, route.target, ctx);
+  const response = await runPayloadExchange(request, route.target, ctx, route.payloadOptions);
   if (!response) {
     return new Response(null, { status: 502 });
   }
   return response;
+}
+
+function handleMeta(request: Request, env: Env): Response {
+  const meta = resolveMetaRoute(request, env);
+  if (!meta) {
+    return notFound();
+  }
+  return Response.json(meta, {
+    headers: {
+      "cache-control": "no-store",
+    },
+  });
 }
 
 function notFound(): Response {

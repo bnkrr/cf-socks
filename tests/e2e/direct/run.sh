@@ -115,7 +115,7 @@ case_ssh() {
     curl "${curl_args[@]}" --silent --show-error --no-buffer --max-time 10 \
       -X POST \
       -H "Authorization: Bearer $E2E_DIRECT_BEARER" \
-      "$(direct_url "$host" "$port")" 2>&1 || true
+      "$(direct_url "$host" "$port")?write_close_after=500ms" 2>&1 || true
   )"
   if ! printf '%s' "$out" | grep -q 'SSH-'; then
     echo "Direct SSH banner did not contain SSH-:" >&2
@@ -153,7 +153,7 @@ case_h3_ssh() {
     curl --http3 --silent --show-error --no-buffer --max-time 10 \
       -X POST \
       -H "Authorization: Bearer $E2E_DIRECT_BEARER" \
-      "$(direct_url "$host" "$port")" 2>&1 || true
+      "$(direct_url "$host" "$port")?write_close_after=500ms" 2>&1 || true
   )"
   if ! printf '%s' "$out" | grep -q 'SSH-'; then
     echo "Direct H3 SSH banner did not contain SSH-:" >&2

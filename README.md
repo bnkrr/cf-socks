@@ -208,7 +208,7 @@ For server-first protocols such as SSH banners:
 curl --http2 --no-buffer --max-time 10 \
   -X POST \
   -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
-  https://<your-worker-host>/direct/github.com/22
+  'https://<your-worker-host>/direct/github.com/22?write_close_after=500ms'
 ```
 
 ## Go SDK
@@ -242,6 +242,20 @@ resp, err := client.Do(ctx, "tcp", "httpforever.com:80", strings.NewReader(
     "GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n",
 ))
 ```
+
+For one-shot protocols that need the target write side to close after sending
+the payload, opt in explicitly:
+
+```go
+resp, err := client.Do(ctx, "tcp", "github.com:22", nil,
+    cfsocks.WithWriteCloseAfter(200*time.Millisecond),
+)
+```
+
+This sends an empty payload, waits 200 ms, then closes the target writable side
+while continuing to read the response. It is useful for SSH banners and similar
+bounded probes. The default is no target write close. The maximum delay is
+10 minutes; for longer-lived responses, leave this option unset.
 
 Use H3 `Do` as a QUIC-based alternative for the same bounded-payload pattern:
 
@@ -298,7 +312,7 @@ defer pool.Close()
 resp, err := pool.Do(ctx, "tcp", "httpforever.com:80", payload)
 ```
 
-`Do(ctx, "tcp", "github.com:22", nil)` sends an empty payload and can read server-first banners such as SSH with either H2 or H3. It is still not an interactive connection. `Do` also does not signal target-side TCP EOF after sending the payload; use it for targets that can respond from the supplied bytes or speak first.
+`Do(ctx, "tcp", "github.com:22", nil)` sends an empty payload and can read server-first banners such as SSH with either H2 or H3. It is still not an interactive connection. Use `WithWriteCloseAfter` only when the target-side write EOF is part of the one-shot exchange.
 
 WSS `Dial` returns a `net.Conn`. Read deadlines are recoverable local wait timeouts. Write deadlines are checked before a WebSocket message write begins; once a write has started, use `Close()` to abandon the connection. Closing WSS also closes the Worker-side target TCP connection, so the same TCP session cannot be resumed by reconnecting.
 
@@ -323,7 +337,7 @@ results, and interpretation.
 - Worker outbound TCP cannot connect to Cloudflare IP ranges.
 - SOCKS5 UDP ASSOCIATE and BIND are not implemented.
 - In WSS `Dial` and SOCKS agent mode, each TCP connection uses one WebSocket to the Worker.
-- H2/H3 mode is bounded-payload only; it is not a SOCKS or `net.Conn` transport, and it does not provide target-side TCP half-close/EOF signaling.
+- H2/H3 mode is bounded-payload only; it is not a SOCKS or `net.Conn` transport. `WithWriteCloseAfter` can close the target write side for one-shot exchanges, but it does not make H2/H3 interactive.
 
 ## Related Projects
 

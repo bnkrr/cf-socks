@@ -13,10 +13,11 @@ import (
 )
 
 type routeSpec struct {
-	method string
-	path   string
-	op     string
-	ws     bool
+	method  string
+	path    string
+	op      string
+	ws      bool
+	options DoOptions
 }
 
 type routePlan struct {
@@ -42,7 +43,12 @@ func (c *Client) buildRoute(network, address string, spec routeSpec) (routePlan,
 	if err != nil {
 		return routePlan{}, err
 	}
-	auth, err := c.authHeader(spec.method, spec.path, token.Claims{Op: spec.op, Host: host, Port: port})
+	claims := token.Claims{Op: spec.op, Host: host, Port: port}
+	if spec.options.WriteCloseAfter != nil {
+		ms := spec.options.WriteCloseAfter.Milliseconds()
+		claims.WriteCloseAfterMS = &ms
+	}
+	auth, err := c.authHeader(spec.method, spec.path, claims)
 	if err != nil {
 		return routePlan{}, err
 	}

@@ -13,14 +13,34 @@ export interface Target {
 
 export type RouteTransport = "wss" | "payload";
 
+export interface PayloadOptions {
+  writeCloseAfterMs?: number;
+}
+
 export interface RouteDecision {
   op: Claims["op"];
   target: Target;
   transport: RouteTransport;
   path: string;
+  payloadOptions?: PayloadOptions;
+}
+
+export interface WorkerMeta {
+  name: "cf-socks";
+  version: string;
+  protocol: number;
+  capabilities: string[];
 }
 
 const nonceCache = new NonceCache();
+const MAX_WRITE_CLOSE_AFTER_MS = 600_000;
+
+export const WORKER_META: WorkerMeta = {
+  name: "cf-socks",
+  version: "0.5.0",
+  protocol: 2,
+  capabilities: ["wss", "h2", "h3", "direct", "write_close_after"],
+};
 
 export async function resolveRoute(
   request: Request,
@@ -60,6 +80,10 @@ export async function resolveRoute(
     target: { host: claims.host, port: claims.port },
     transport,
     path: url.pathname,
+    payloadOptions:
+      transport === "payload" && claims.write_close_after_ms !== undefined
+        ? { writeCloseAfterMs: claims.write_close_after_ms }
+        : undefined,
   };
 }
 
@@ -76,12 +100,28 @@ export function resolveDirectRoute(request: Request, env: Env): RouteDecision | 
   if (!target) {
     return null;
   }
+  const payloadOptions = parseDirectPayloadOptions(url);
+  if (!payloadOptions) {
+    return null;
+  }
   return {
     op: "payload",
     target,
     transport: "payload",
     path: url.pathname,
+    payloadOptions,
   };
+}
+
+export function resolveMetaRoute(request: Request, env: Env): WorkerMeta | null {
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.pathname !== "/__meta") {
+    return null;
+  }
+  if (!env.DIRECT_BEARER || !verifyStaticBearer(request.headers.get("Authorization"), env.DIRECT_BEARER)) {
+    return null;
+  }
+  return WORKER_META;
 }
 
 function parseDirectTarget(pathname: string): Target | null {
@@ -119,6 +159,30 @@ function verifyStaticBearer(header: string | null, expected: string): boolean {
   }
   const actual = header.slice(prefix.length);
   return actual.length === expected.length && constantTimeEqual(actual, expected);
+}
+
+function parseDirectPayloadOptions(url: URL): PayloadOptions | null {
+  const value = url.searchParams.get("write_close_after");
+  if (value === null || value === "none") {
+    return {};
+  }
+  const ms = parseDurationMs(value);
+  return ms === null ? null : { writeCloseAfterMs: ms };
+}
+
+function parseDurationMs(value: string): number | null {
+  if (value === "0") {
+    return 0;
+  }
+  const match = /^([1-9][0-9]*)(ms|s|m)$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2];
+  const multiplier = unit === "ms" ? 1 : unit === "s" ? 1000 : 60_000;
+  const ms = amount * multiplier;
+  return Number.isSafeInteger(ms) && ms <= MAX_WRITE_CLOSE_AFTER_MS ? ms : null;
 }
 
 function constantTimeEqual(a: string, b: string): boolean {

@@ -14,17 +14,19 @@ import (
 )
 
 const (
-	Version       byte = 0x02
-	keyPrefix          = "cf-socks auth v2\n"
-	defaultWindow      = 120 * time.Second
-	maxTokenBytes      = 4096
+	Version            byte = 0x02
+	keyPrefix               = "cf-socks auth v2\n"
+	defaultWindow           = 120 * time.Second
+	maxTokenBytes           = 4096
+	MaxWriteCloseAfter      = 10 * time.Minute
 )
 
 type Claims struct {
-	Op   string `json:"op"`
-	Host string `json:"host"`
-	Port int    `json:"port"`
-	TS   int64  `json:"ts"`
+	Op                string `json:"op"`
+	Host              string `json:"host"`
+	Port              int    `json:"port"`
+	TS                int64  `json:"ts"`
+	WriteCloseAfterMS *int64 `json:"write_close_after_ms,omitempty"`
 }
 
 type NonceCache interface {
@@ -164,6 +166,12 @@ func validateClaims(claims Claims) error {
 	}
 	if claims.TS == 0 {
 		return errors.New("invalid timestamp")
+	}
+	if claims.WriteCloseAfterMS != nil {
+		maxMS := MaxWriteCloseAfter.Milliseconds()
+		if *claims.WriteCloseAfterMS < 0 || *claims.WriteCloseAfterMS > maxMS {
+			return errors.New("invalid write_close_after_ms")
+		}
 	}
 	return nil
 }
