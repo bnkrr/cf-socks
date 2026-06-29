@@ -45,6 +45,8 @@ H2/H3 模式适合大量短的 client-first 交换，但它不是 `net.Conn` tra
 
 `cf-socks` 明确区分连接语义，因为对这个场景来说，Workers 的 HTTP request 路径不能提供和 TCP socket 相同的长期全双工行为。WSS `Dial` 是交互式 TCP 路径，返回 `net.Conn`。H2/H3 `Do` 是有边界的 request/response 操作：它向 TCP 目标发送一个可选 payload，并把目标响应流返回。这样 `Do(nil)` 读取 SSH banner 这类 server-first 场景是显式 API，但不会暗示 H2/H3 是通用 TCP 连接。
 
+端点、鉴权和 Worker TCP 绑定细节见 [Protocol Model](docs/protocol.md)。
+
 ## 环境要求
 
 - Go，用于构建和运行本地 agent。

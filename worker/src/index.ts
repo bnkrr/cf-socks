@@ -10,6 +10,7 @@ const nonceCache = new NonceCache();
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // See docs/protocol.md for the endpoint and TCP binding model.
     const url = new URL(request.url);
     if (url.pathname === "/wss") {
       return handleWSS(request, env, ctx);

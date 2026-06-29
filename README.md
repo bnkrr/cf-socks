@@ -45,6 +45,8 @@ H2/H3 mode is useful for many short client-first exchanges, but it is not a `net
 
 `cf-socks` keeps connection semantics explicit because Workers' HTTP request path does not provide the same open-ended full-duplex behavior as a TCP socket for this use case. WSS `Dial` is the interactive TCP path and returns a `net.Conn`. H2/H3 `Do` is a bounded request/response operation: it sends one optional payload to a TCP target and streams back the target response. This also makes server-first reads, such as `Do(nil)` for SSH banners, an intentional API without implying that H2/H3 is a general TCP connection.
 
+For endpoint, authentication, and Worker TCP binding details, see [Protocol Model](docs/protocol.md).
+
 ## Requirements
 
 - Go, to build and run the local agent.
