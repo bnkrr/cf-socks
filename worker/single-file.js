@@ -149,7 +149,7 @@ var nonceCache = new NonceCache();
 var MAX_WRITE_CLOSE_AFTER_MS2 = 6e5;
 var WORKER_META = {
   name: "cf-socks",
-  version: "0.5.0",
+  version: "0.6.0",
   protocol: 2,
   capabilities: ["wss", "h2", "h3", "direct", "write_close_after"]
 };

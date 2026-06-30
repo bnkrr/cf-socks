@@ -104,6 +104,11 @@ jobs:
     needs: build
 
     steps:
+      - name: Checkout changelog
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
       - name: Download release artifacts
         uses: actions/download-artifact@v8
         with:
@@ -113,10 +118,30 @@ jobs:
       - name: List release assets
         run: ls -la dist
 
+      - name: Extract release notes
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="$TAG_NAME" '
+              $0 == "## " tag { found=1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md > release-notes.md
+          fi
+          if [ ! -s release-notes.md ]; then
+            {
+              echo "No CHANGELOG.md entry found for ${TAG_NAME}."
+              echo
+              echo "See the commit history for details."
+            } > release-notes.md
+          fi
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           files: dist/*
-          generate_release_notes: true
+          body_path: release-notes.md
           overwrite_files: true
