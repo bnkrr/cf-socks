@@ -351,6 +351,74 @@ func TestClientDoIncludesWriteCloseAfterClaim(t *testing.T) {
 	defer resp.Body.Close()
 }
 
+func TestClientDoIncludesTLSClaim(t *testing.T) {
+	const secret = "test-secret"
+	worker := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, err := token.Open(secret, token.AAD(r.Method, r.URL.Path), bearer(t, r), token.OpenOptions{Now: time.Now()})
+		if err != nil {
+			t.Errorf("open token: %v", err)
+			http.NotFound(w, r)
+			return
+		}
+		if claims.SecureTransport != "on" {
+			t.Errorf("secure_transport = %q, want on", claims.SecureTransport)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	worker.EnableHTTP2 = true
+	worker.StartTLS()
+	defer worker.Close()
+
+	client := Client{Endpoint: worker.URL, Secret: secret, Transport: TransportH2, HTTPClient: worker.Client()}
+	resp, err := client.Do(context.Background(), "tcp", "example.test:443", nil, WithTLS(TLSOn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+}
+
+func TestClientDialIncludesDefaultTLSClaim(t *testing.T) {
+	const secret = "test-secret"
+	var got token.Claims
+	worker := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, err := token.Open(secret, token.AAD(r.Method, r.URL.Path), bearer(t, r), token.OpenOptions{Now: time.Now()})
+		if err != nil {
+			t.Errorf("open token: %v", err)
+			http.NotFound(w, r)
+			return
+		}
+		got = claims
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		_ = c.Write(ctx, websocket.MessageText, []byte("OK\n"))
+	}))
+	defer worker.Close()
+
+	client := Client{Endpoint: worker.URL, Secret: secret, Transport: TransportWSS, HTTPClient: worker.Client(), TargetTLS: TLSOn}
+	conn, err := client.Dial(context.Background(), "tcp", "example.test:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if got.SecureTransport != "on" {
+		t.Fatalf("secure_transport = %q, want on", got.SecureTransport)
+	}
+}
+
+func TestClientRejectsInvalidTLSMode(t *testing.T) {
+	client := Client{Endpoint: "https://worker.test", Secret: "secret", Transport: TransportH2}
+	_, err := client.Do(context.Background(), "tcp", "example.test:443", nil, WithTLS("starttls"))
+	if err == nil {
+		t.Fatal("expected invalid tls mode error")
+	}
+}
+
 func TestClientDoRejectsNegativeWriteCloseAfter(t *testing.T) {
 	client := Client{Endpoint: "https://worker.test", Secret: "secret", Transport: TransportH2}
 	_, err := client.Do(context.Background(), "tcp", "example.test:80", nil, WithWriteCloseAfter(-time.Millisecond))

@@ -10,7 +10,7 @@ import (
 func TestSealOpen(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	writeCloseAfterMS := int64(200)
-	claims := Claims{Op: "dial", Host: "example.test", Port: 443, WriteCloseAfterMS: &writeCloseAfterMS}
+	claims := Claims{Op: "dial", Host: "example.test", Port: 443, SecureTransport: "on", WriteCloseAfterMS: &writeCloseAfterMS}
 	sealed, err := Seal("secret", AAD("GET", "/wss"), claims, now)
 	if err != nil {
 		t.Fatal(err)
@@ -24,6 +24,9 @@ func TestSealOpen(t *testing.T) {
 	}
 	if opened.WriteCloseAfterMS == nil || *opened.WriteCloseAfterMS != writeCloseAfterMS {
 		t.Fatalf("write_close_after_ms = %v, want %d", opened.WriteCloseAfterMS, writeCloseAfterMS)
+	}
+	if opened.SecureTransport != "on" {
+		t.Fatalf("secure_transport = %q, want on", opened.SecureTransport)
 	}
 }
 
@@ -65,6 +68,9 @@ func TestSealRejectsMalformedClaims(t *testing.T) {
 	}
 	if _, err := Seal("secret", AAD("GET", "/wss"), Claims{Op: "other", Host: "example.test", Port: 443}, time.Now()); err == nil {
 		t.Fatal("expected bad op")
+	}
+	if _, err := Seal("secret", AAD("GET", "/wss"), Claims{Op: "dial", Host: "example.test", Port: 443, SecureTransport: "starttls"}, time.Now()); err == nil {
+		t.Fatal("expected bad secure_transport")
 	}
 	writeCloseAfterMS := int64(-1)
 	if _, err := Seal("secret", AAD("POST", "/h2"), Claims{Op: "payload", Host: "example.test", Port: 443, WriteCloseAfterMS: &writeCloseAfterMS}, time.Now()); err == nil {

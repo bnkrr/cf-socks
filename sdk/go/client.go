@@ -26,6 +26,7 @@ type Client struct {
 	Transport         Transport
 	HTTPClient        *http.Client
 	InsecureAllowHTTP bool
+	TargetTLS         TLSMode
 }
 
 type Response struct {

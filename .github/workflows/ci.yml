@@ -28,7 +28,7 @@ jobs:
       - name: Verify dashboard Worker bundle
         run: |
           npm run worker:bundle-dashboard
-          git diff --exit-code worker/single-file.js
+          git diff --exit-code worker/single-file
 
       - name: Typecheck Worker
         run: npm run typecheck
@@ -75,4 +75,6 @@ jobs:
           E2E_HTTP_TARGET: ${{ vars.E2E_HTTP_TARGET }}
           E2E_HTTPS_TARGET: ${{ vars.E2E_HTTPS_TARGET }}
           E2E_TCP_BANNER_TARGET: ${{ vars.E2E_TCP_BANNER_TARGET }}
+          E2E_FETCH_TARGET: ${{ vars.E2E_FETCH_TARGET }}
+          E2E_TLS_HTTP_TARGET: ${{ vars.E2E_TLS_HTTP_TARGET }}
         run: tests/e2e/run.sh

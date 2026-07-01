@@ -86,9 +86,13 @@ jobs:
             rm "${asset}"
           fi
 
-      - name: Include dashboard Worker once
+      - name: Include dashboard Worker bundles
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        run: cp worker/single-file.js dist/cf-socks-worker-dashboard.js
+        run: |
+          cp worker/single-file/full.js dist/cf-socks-worker-dashboard-full.js
+          cp worker/single-file/wss-only.js dist/cf-socks-worker-dashboard-wss-only.js
+          cp worker/single-file/direct-connect.js dist/cf-socks-worker-dashboard-direct-connect.js
+          cp worker/single-file/url-full.js dist/cf-socks-worker-dashboard-url-full.js
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7

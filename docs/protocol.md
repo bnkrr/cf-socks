@@ -57,6 +57,8 @@ Creates one bounded payload exchange over HTTP/2.
 - Optional encrypted claim `write_close_after_ms` closes the target writable
   side after request-body EOF and the configured delay. Valid range is
   `0..600000` milliseconds.
+- Optional encrypted claim `secure_transport` controls Worker-to-target TLS.
+  Supported values are `off` and `on`; omitted means `off`.
 
 ### `POST /h3`
 
@@ -79,6 +81,25 @@ Creates one bounded payload exchange over the client's selected HTTP transport.
   writable side after request-body EOF and the configured delay. `none` is the
   same as omitting the query. Maximum delay is `600s`/`10m`; use the default
   disabled behavior for longer-lived responses.
+- Optional query `tls=off|on` controls Worker-to-target TLS. Omitted means
+  `off`.
+- This endpoint is not used by the Go SDK or local SOCKS agent.
+
+### `/direct-url?target=<url>`
+
+Routes one static-bearer request by parsing a target URL.
+
+- Requires `DIRECT_BEARER` to be configured on the Worker.
+- Requires `Authorization: Bearer <DIRECT_BEARER>`.
+- `target=tcp://host:port` creates one bounded payload exchange through
+  Worker TCP sockets. It uses the same request and response body behavior as
+  `/direct/:host/:port`.
+- `target=tcp://host:port&tls=on` makes the Worker establish TLS to the target
+  before writing payload bytes.
+- `target=http://...` and `target=https://...` proxy the incoming request with
+  Worker `fetch()`. The Worker strips `Authorization`, `Host`, and hop-by-hop
+  headers before forwarding.
+- `write_close_after` and `tls` are only valid for `tcp://` targets.
 - This endpoint is not used by the Go SDK or local SOCKS agent.
 
 ### `GET /__meta`
@@ -95,9 +116,9 @@ Example response:
 ```json
 {
   "name": "cf-socks",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "protocol": 2,
-  "capabilities": ["wss", "h2", "h3", "direct", "write_close_after"]
+  "capabilities": ["wss", "h2", "h3", "direct", "direct_url", "fetch", "write_close_after"]
 }
 ```
 
@@ -131,6 +152,7 @@ Plaintext claims:
   "op": "dial",
   "host": "example.com",
   "port": 443,
+  "secure_transport": "on",
   "ts": 1234567890,
   "write_close_after_ms": 200
 }
@@ -140,6 +162,9 @@ Currently, `op` is `"dial"` for `/wss` and `"payload"` for `/h2` and `/h3`.
 `write_close_after_ms` is optional and only meaningful for payload exchanges.
 The field must be absent to disable write close; if present, it must be an
 integer in `0..600000`.
+`secure_transport` is optional and may be `off` or `on`. `starttls` is not
+exposed by cf-socks because it requires protocol-specific control over when the
+Worker calls `socket.startTls()`.
 
 Key derivation:
 
@@ -193,7 +218,7 @@ Authorization: Bearer <DIRECT_BEARER>
 
 This is intentionally simpler than the encrypted SDK token so tools like `curl`
 can verify the Worker without installing a client. It is a long-lived API key:
-anyone who has it can use `/direct/:host/:port` until the Worker environment
+anyone who has it can use `/direct/:host/:port` and `/direct-url` until the Worker environment
 variable is changed or removed.
 
 ## Worker TCP Binding
@@ -230,7 +255,7 @@ Conceptually:
 ```ts
 socket = connect(
   { hostname: claims.host, port: claims.port },
-  { secureTransport: "off", allowHalfOpen: true },
+  { secureTransport: claims.secure_transport ?? "off", allowHalfOpen: true },
 );
 await socket.opened;
 
@@ -264,7 +289,7 @@ and server-first reads, but it is not a general interactive TCP connection.
 - Unknown path: empty `404`.
 - Invalid auth, expired token, replayed nonce, wrong op, wrong method/path:
   empty `404`.
-- `/direct/:host/:port` when `DIRECT_BEARER` is missing, wrong, or target is
+- `/direct/:host/:port` or `/direct-url` when `DIRECT_BEARER` is missing, wrong, or target is
   malformed: empty `404`.
 - `/wss` without WebSocket upgrade after valid auth: `426`.
 - `/wss` target connect failure after upgrade: text `ERR connect_failed\n`, then
@@ -281,8 +306,10 @@ and server-first reads, but it is not a general interactive TCP connection.
   usability. Use the encrypted SDK endpoints when target metadata should not be
   visible in paths or logs.
 - Worker TLS is provided by HTTPS/WSS/H3 and must be verified by clients.
-- The target TCP connection is raw TCP. cf-socks does not validate or terminate
-  target TLS; applications can run TLS inside the TCP stream if they need it.
+- The target TCP connection is raw TCP by default. With `tls=on` or
+  `secure_transport=on`, the Worker terminates target TLS and relays plaintext
+  bytes over that TLS connection. For ordinary SOCKS-style HTTPS, leave this
+  off so the original client performs TLS inside the TCP stream.
 - Replay protection is intentionally simple and local to a Worker isolate's
   nonce cache. It reduces accidental or opportunistic replay within the token
   time window, but it is not a distributed session system.

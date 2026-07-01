@@ -70,7 +70,7 @@ export CF_SOCKS_DIRECT_BEARER="$(openssl rand -base64 32)"
 
 ### 方式 A：Cloudflare Dashboard
 
-在 Cloudflare dashboard 中创建一个 Worker，把 [worker/single-file.js](worker/single-file.js) 复制到在线编辑器，并设置环境变量：
+在 Cloudflare dashboard 中创建一个 Worker，把仓库内置的某个 dashboard bundle 复制到在线编辑器，并设置环境变量：
 
 ```text
 AUTH_SECRET=<your generated secret>
@@ -80,14 +80,31 @@ DIRECT_BEARER=<your generated direct bearer>
 
 然后在 dashboard 中部署 Worker。这个路径不需要本地安装 Node.js、npm 或 Wrangler。
 
-Dashboard 文件由 Wrangler 使用的同一份 Worker 源码生成，请不要手动编辑。修改 Worker 源码后，可用下面命令重新生成：
+Dashboard bundles 由 Wrangler 使用的同一份 Worker 源码生成，请不要手动编辑。修改 Worker 源码后，可用下面命令重新生成：
 
 ```bash
 npm install
 npm run worker:bundle-dashboard
 ```
 
-CI 会检查 [worker/single-file.js](worker/single-file.js) 是否和 `worker/src/` 保持同步。
+CI 会检查 [worker/single-file/](worker/single-file/) 是否和 `worker/src/` 保持同步。
+
+可直接复制到 dashboard 的文件：
+
+- [worker/single-file/full.js](worker/single-file/full.js)：全部 endpoint。
+- [worker/single-file/wss-only.js](worker/single-file/wss-only.js)：只包含加密 WSS tunnel。
+- [worker/single-file/direct-connect.js](worker/single-file/direct-connect.js)：只包含 static-bearer TCP direct endpoint。
+- [worker/single-file/url-full.js](worker/single-file/url-full.js)：包含 static-bearer URL ingress，并支持 TCP connect 和 fetch egress。
+
+如果要在其他路径临时生成单文件 Worker，可以指定 profile：
+
+```bash
+npm run worker:bundle -- --profile wss-only --outfile .local/worker/wss-only.js
+npm run worker:bundle -- --profile direct-connect --outfile .local/worker/direct-connect.js
+npm run worker:bundle -- --profile url-full --outfile .local/worker/url-full.js
+```
+
+目前可用 profile 是 `full`、`wss-only`、`direct-connect` 和 `url-full`。
 
 ### 方式 B：Wrangler
 
@@ -202,6 +219,32 @@ printf 'GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n' \
       https://<your-worker-host>/direct/httpforever.com/80
 ```
 
+URL Direct endpoint 会根据 target URL scheme 选择 egress。`tcp://` 走 Worker TCP socket，`http://` 和 `https://` 走 Worker `fetch()`：
+
+```bash
+printf 'GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n' \
+  | curl --http2 --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+      --data-binary @- \
+      'https://<your-worker-host>/direct-url?target=tcp://httpforever.com:80'
+
+curl --http2 --no-buffer \
+  -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+  'https://<your-worker-host>/direct-url?target=https://example.com/'
+```
+
+对 `tcp://` target，可以加 `tls=on`，让 Worker 到目标之间建立 TLS，并在这条 TLS 连接里转发明文 payload。默认是 `tls=off`；`starttls` 暂不暴露，因为它需要根据具体协议在字节流中选择升级时机。
+
+```bash
+printf 'GET / HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n' \
+  | curl --http2 --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+      --data-binary @- \
+      'https://<your-worker-host>/direct-url?target=tcp://www.google.com:443&tls=on'
+```
+
 对 SSH banner 这类 server-first 协议：
 
 ```bash
@@ -310,11 +353,13 @@ resp, err := pool.Do(ctx, "tcp", "httpforever.com:80", payload)
 
 WSS `Dial` 返回 `net.Conn`。读 deadline 是可恢复的本地等待超时；写 deadline 只会在 WebSocket message 开始写入前生效，一旦写入已经开始，如需放弃连接请调用 `Close()`。关闭 WSS 也会关闭 Worker 侧的目标 TCP 连接，重连不能恢复同一个 TCP session。
 
+目标 TLS 必须显式指定。`Client{TargetTLS: cfsocks.TLSOn}` 会让 SDK `Dial` 和 `Do` 使用 Worker-to-target TLS，`Client.Do(..., cfsocks.WithTLS(cfsocks.TLSOn))` 可以对单次 bounded payload 覆盖。普通 SOCKS 风格 HTTPS 隧道应保持关闭，因为原始客户端会在 TCP 流内部自己完成 TLS。
+
 ## 安全
 
 Worker 不是开放代理。客户端必须先使用从 `AUTH_SECRET` 派生的加密 bearer token 完成鉴权，Worker 才会打开任何出站 TCP 连接。
 
-Direct endpoint 只有配置了 `DIRECT_BEARER` 才会启用。请把它当作长期 API key；如果泄漏，应立即轮换。
+Direct endpoints 只有配置了 `DIRECT_BEARER` 才会启用。请把它当作长期 API key；如果泄漏，应立即轮换。
 
 不要提交真实密钥。请使用 Wrangler secrets、Cloudflare 环境变量或本地 shell 环境变量。
 

@@ -8,6 +8,7 @@ export interface Claims {
   host: string;
   port: number;
   ts: number;
+  secure_transport?: "off" | "on";
   write_close_after_ms?: number;
 }
 
@@ -136,6 +137,12 @@ function parseClaims(input: string): Claims | null {
     port: candidate.port,
     ts: candidate.ts,
   };
+  if ("secure_transport" in candidate) {
+    if (candidate.secure_transport !== "off" && candidate.secure_transport !== "on") {
+      return null;
+    }
+    claims.secure_transport = candidate.secure_transport;
+  }
   if ("write_close_after_ms" in candidate) {
     if (
       typeof candidate.write_close_after_ms !== "number" ||

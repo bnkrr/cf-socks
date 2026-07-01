@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
@@ -9,11 +9,15 @@ vi.mock("cloudflare:sockets", () => ({
 }));
 
 import worker from "../src/index";
-import { runWssTunnel } from "../src/tunnel";
+import { runWssTunnel } from "../src/response/wss-tunnel";
 
 describe("worker endpoints", () => {
   beforeEach(() => {
     mocks.connect.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("/wss rejects invalid auth before upgrade", async () => {
@@ -209,6 +213,44 @@ describe("worker endpoints", () => {
       { secureTransport: "off", allowHalfOpen: true },
     );
     expect(new TextDecoder().decode(written[0])).toBe("h3-client-payload");
+  });
+
+  it("/h2 forwards target TLS mode from bearer claims", async () => {
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("tls-response"));
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>(),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const auth = await bearer("secret", "POST", "/h2", {
+      op: "payload",
+      host: "example.test",
+      port: 443,
+      ts: Math.floor(Date.now() / 1000),
+      secure_transport: "on",
+    });
+    const response = await worker.fetch(
+      new Request("https://worker.test/h2", {
+        method: "POST",
+        headers: { authorization: auth },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("tls-response");
+    expect(mocks.connect).toHaveBeenCalledWith(
+      { hostname: "example.test", port: 443 },
+      { secureTransport: "on", allowHalfOpen: true },
+    );
   });
 
   it("/h2 closes target writable when token requests write_close_after", async () => {
@@ -457,6 +499,182 @@ describe("worker endpoints", () => {
     );
   });
 
+  it("/direct-url accepts tcp target URL and uses connect egress", async () => {
+    const written: Uint8Array[] = [];
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("tcp-url-response"));
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>({
+        write(chunk) {
+          written.push(chunk);
+        },
+      }),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/direct-url?target=tcp%3A%2F%2F1.1.1.1%3A80", {
+        method: "POST",
+        headers: { authorization: "Bearer direct-secret" },
+        body: "tcp-url-client-payload",
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("tcp-url-response");
+    await Promise.all(ctx.promises);
+    expect(mocks.connect).toHaveBeenCalledWith(
+      { hostname: "1.1.1.1", port: 80 },
+      { secureTransport: "off", allowHalfOpen: true },
+    );
+    expect(new TextDecoder().decode(written[0])).toBe("tcp-url-client-payload");
+  });
+
+  it("/direct-url accepts readable unencoded tcp target URLs", async () => {
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("raw-url-response"));
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>(),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/direct-url?target=tcp://example.test:80", {
+        method: "POST",
+        headers: { authorization: "Bearer direct-secret" },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("raw-url-response");
+    expect(mocks.connect).toHaveBeenCalledWith(
+      { hostname: "example.test", port: 80 },
+      { secureTransport: "off", allowHalfOpen: true },
+    );
+  });
+
+  it("/direct-url accepts tls=on for tcp target URLs", async () => {
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("tls-url-response"));
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>(),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/direct-url?target=tcp://example.test:443&tls=on", {
+        method: "POST",
+        headers: { authorization: "Bearer direct-secret" },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("tls-url-response");
+    expect(mocks.connect).toHaveBeenCalledWith(
+      { hostname: "example.test", port: 443 },
+      { secureTransport: "on", allowHalfOpen: true },
+    );
+  });
+
+  it("/direct-url accepts https target URL and uses fetch egress", async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("https://example.test/a.html?x=1");
+      expect(init.method).toBe("GET");
+      expect(init.body).toBeNull();
+      const headers = init.headers as Headers;
+      expect(headers.get("authorization")).toBeNull();
+      expect(headers.get("connection")).toBeNull();
+      expect(headers.get("x-hop")).toBeNull();
+      expect(headers.get("x-test")).toBe("yes");
+      return new Response("fetch-response", {
+        status: 203,
+        headers: {
+          "content-type": "text/plain",
+          connection: "x-response-hop, close",
+          "x-response-hop": "hidden",
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const ctx = executionContext();
+    const response = await worker.fetch(
+      new Request("https://worker.test/direct-url?target=https%3A%2F%2Fexample.test%2Fa.html%3Fx%3D1", {
+        method: "GET",
+        headers: {
+          authorization: "Bearer direct-secret",
+          connection: "x-hop",
+          "x-hop": "hidden",
+          "x-test": "yes",
+        },
+      }),
+      env(),
+      ctx,
+    );
+
+    expect(response.status).toBe(203);
+    expect(response.headers.get("content-type")).toBe("text/plain");
+    expect(response.headers.get("connection")).toBeNull();
+    expect(response.headers.get("x-response-hop")).toBeNull();
+    expect(await response.text()).toBe("fetch-response");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
+  it("/direct-url rejects malformed target URLs before egress", async () => {
+    const cases = [
+      "https://worker.test/direct-url",
+      "https://worker.test/direct-url?target=udp%3A%2F%2F1.1.1.1%3A53",
+      "https://worker.test/direct-url?target=tcp%3A%2F%2F1.1.1.1",
+      "https://worker.test/direct-url?target=tcp%3A%2F%2F1.1.1.1%3A80%2Fpath",
+      "https://worker.test/direct-url?target=tcp%3A%2F%2F1.1.1.1%3A80&tls=starttls",
+      "https://worker.test/direct-url?target=https%3A%2F%2Fuser%3Apass%40example.test%2F",
+      "https://worker.test/direct-url?target=https%3A%2F%2Fexample.test%2F%23fragment",
+      "https://worker.test/direct-url?target=https%3A%2F%2Fexample.test%2F&write_close_after=0",
+      "https://worker.test/direct-url?target=https%3A%2F%2Fexample.test%2F&tls=on",
+    ];
+
+    for (const url of cases) {
+      const ctx = executionContext();
+      const response = await worker.fetch(
+        new Request(url, {
+          method: "POST",
+          headers: { authorization: "Bearer direct-secret" },
+        }),
+        env(),
+        ctx,
+      );
+
+      expect(response.status, url).toBe(404);
+      expect(await response.text(), url).toBe("");
+    }
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
   it("/direct rejects malformed target paths before connect", async () => {
     const cases = [
       "https://worker.test/direct/example.test/0",
@@ -539,6 +757,27 @@ describe("worker endpoints", () => {
     expect(ws.sentText()).toContain("OK\n");
     expect(ws.sentText()).toContain("target-response");
     expect(new TextDecoder().decode(written[0])).toBe("client-payload");
+  });
+
+  it("wss tunnel forwards target TLS mode", async () => {
+    const ws = new FakeWebSocket();
+    mocks.connect.mockReturnValue({
+      opened: Promise.resolve(),
+      readable: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      writable: new WritableStream<Uint8Array>(),
+      close: vi.fn(() => Promise.resolve()),
+    });
+
+    await runWssTunnel(ws as unknown as WebSocket, { host: "example.test", port: 443 }, { secureTransport: "on" });
+
+    expect(mocks.connect).toHaveBeenCalledWith(
+      { hostname: "example.test", port: 443 },
+      { secureTransport: "on", allowHalfOpen: true },
+    );
   });
 
   it("wss tunnel closes on text websocket messages", async () => {
@@ -636,7 +875,14 @@ async function bearer(
   secret: string,
   method: string,
   path: string,
-  claims: { op: "dial" | "payload"; host: string; port: number; ts: number; write_close_after_ms?: number },
+  claims: {
+    op: "dial" | "payload";
+    host: string;
+    port: number;
+    ts: number;
+    secure_transport?: "off" | "on";
+    write_close_after_ms?: number;
+  },
 ): Promise<string> {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const key = await aesKey(secret);

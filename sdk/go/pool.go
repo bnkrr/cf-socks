@@ -18,6 +18,7 @@ type ClientPoolConfig struct {
 	Size              int
 	HTTPClients       []*http.Client
 	InsecureAllowHTTP bool
+	TargetTLS         TLSMode
 }
 
 type ClientPool struct {
@@ -74,6 +75,7 @@ func NewClientPool(cfg ClientPoolConfig) (*ClientPool, error) {
 			Transport:         transport,
 			HTTPClient:        httpClient,
 			InsecureAllowHTTP: cfg.InsecureAllowHTTP,
+			TargetTLS:         cfg.TargetTLS,
 		}
 	}
 	return &ClientPool{clients: clients, owned: owned}, nil

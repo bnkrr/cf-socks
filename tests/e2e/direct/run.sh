@@ -69,6 +69,11 @@ direct_url() {
   printf '%s/direct/%s/%s' "${E2E_WORKER_URL%/}" "$encoded_host" "$port"
 }
 
+direct_target_url() {
+  target_url="$1"
+  printf '%s/direct-url?target=%s' "${E2E_WORKER_URL%/}" "$target_url"
+}
+
 require_h3() {
   if [[ "$E2E_WORKER_URL" != https://* ]]; then
     echo "skip $case_name: HTTP/3 Direct E2E requires https:// E2E_WORKER_URL"
@@ -162,6 +167,63 @@ case_h3_ssh() {
   fi
 }
 
+case_url_tcp_http() {
+  target="$(target_value E2E_HTTP_TARGET httpforever.com:80)"
+  host="$(target_host "$target")"
+  port="$(target_port "$target")"
+  curl_args=()
+  if [[ "$E2E_WORKER_URL" == https://* ]]; then
+    curl_args+=(--http2)
+  fi
+  out="$(
+    printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$host" \
+      | curl "${curl_args[@]}" --fail --silent --show-error --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $E2E_DIRECT_BEARER" \
+      --data-binary @- \
+      "$(direct_target_url "tcp://$host:$port")"
+  )"
+  first_line="$(printf '%s' "$out" | sed -n '1p')"
+  case "$first_line" in
+    HTTP/*) ;;
+    *) echo "unexpected Direct URL TCP HTTP status line: $first_line" >&2; return 1 ;;
+  esac
+}
+
+case_url_fetch_https() {
+  target="$(target_value E2E_FETCH_TARGET https://example.com/)"
+  curl_args=()
+  if [[ "$E2E_WORKER_URL" == https://* ]]; then
+    curl_args+=(--http2)
+  fi
+  curl "${curl_args[@]}" --fail --silent --show-error --no-buffer \
+    -H "Authorization: Bearer $E2E_DIRECT_BEARER" \
+    "$(direct_target_url "$target")" >/dev/null
+}
+
+case_url_tcp_tls_http() {
+  target="$(target_value E2E_TLS_HTTP_TARGET www.google.com:443)"
+  host="$(target_host "$target")"
+  port="$(target_port "$target")"
+  curl_args=()
+  if [[ "$E2E_WORKER_URL" == https://* ]]; then
+    curl_args+=(--http2)
+  fi
+  out="$(
+    printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$host" \
+      | curl "${curl_args[@]}" --fail --silent --show-error --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $E2E_DIRECT_BEARER" \
+      --data-binary @- \
+      "$(direct_target_url "tcp://$host:$port")&tls=on"
+  )"
+  first_line="$(printf '%s' "$out" | sed -n '1p')"
+  case "$first_line" in
+    HTTP/*) ;;
+    *) echo "unexpected Direct URL TCP TLS HTTP status line: $first_line" >&2; return 1 ;;
+  esac
+}
+
 run_case() {
   name="$1"
   echo "=== direct $name"
@@ -170,6 +232,9 @@ run_case() {
     ssh) case_ssh ;;
     h3-http) case_h3_http ;;
     h3-ssh) case_h3_ssh ;;
+    url-tcp-http) case_url_tcp_http ;;
+    url-fetch-https) case_url_fetch_https ;;
+    url-tcp-tls-http) case_url_tcp_tls_http ;;
     *) echo "unknown Direct E2E case: $name" >&2; exit 2 ;;
   esac
 }
@@ -179,6 +244,9 @@ if [ "$case_name" = "all" ]; then
   run_case ssh
   run_case h3-http
   run_case h3-ssh
+  run_case url-tcp-http
+  run_case url-fetch-https
+  run_case url-tcp-tls-http
 else
   run_case "$case_name"
 fi

@@ -17,6 +17,7 @@ type ClientConfig struct {
 	Endpoint          string
 	Secret            string
 	InsecureAllowHTTP bool
+	TargetTLS         cfsocks.TLSMode
 }
 
 type Client struct {
@@ -33,6 +34,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		Transport:         cfsocks.TransportH3,
 		HTTPClient:        &http.Client{Transport: transport},
 		InsecureAllowHTTP: cfg.InsecureAllowHTTP,
+		TargetTLS:         cfg.TargetTLS,
 	}
 	return &Client{client: client, transport: transport}, nil
 }
@@ -62,6 +64,7 @@ type PoolConfig struct {
 	Secret            string
 	Size              int
 	InsecureAllowHTTP bool
+	TargetTLS         cfsocks.TLSMode
 }
 
 type Pool struct {
@@ -92,6 +95,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		Size:              size,
 		HTTPClients:       clients,
 		InsecureAllowHTTP: cfg.InsecureAllowHTTP,
+		TargetTLS:         cfg.TargetTLS,
 	})
 	if err != nil {
 		for _, transport := range transports {

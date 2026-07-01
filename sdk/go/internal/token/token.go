@@ -26,6 +26,7 @@ type Claims struct {
 	Host              string `json:"host"`
 	Port              int    `json:"port"`
 	TS                int64  `json:"ts"`
+	SecureTransport   string `json:"secure_transport,omitempty"`
 	WriteCloseAfterMS *int64 `json:"write_close_after_ms,omitempty"`
 }
 
@@ -166,6 +167,9 @@ func validateClaims(claims Claims) error {
 	}
 	if claims.TS == 0 {
 		return errors.New("invalid timestamp")
+	}
+	if claims.SecureTransport != "" && claims.SecureTransport != "off" && claims.SecureTransport != "on" {
+		return errors.New("invalid secure_transport")
 	}
 	if claims.WriteCloseAfterMS != nil {
 		maxMS := MaxWriteCloseAfter.Milliseconds()

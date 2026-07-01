@@ -70,7 +70,7 @@ export CF_SOCKS_DIRECT_BEARER="$(openssl rand -base64 32)"
 
 ### Option A: Cloudflare Dashboard
 
-Create a Worker in the Cloudflare dashboard, copy [worker/single-file.js](worker/single-file.js) into the online editor, and set these environment variables:
+Create a Worker in the Cloudflare dashboard, copy one of the checked-in dashboard bundles into the online editor, and set these environment variables:
 
 ```text
 AUTH_SECRET=<your generated secret>
@@ -80,14 +80,31 @@ DIRECT_BEARER=<your generated direct bearer>
 
 Deploy the Worker from the dashboard. No local Node.js, npm, or Wrangler setup is required for this path.
 
-The dashboard file is generated from the same Worker source used by Wrangler. Do not edit it by hand. To regenerate it after changing Worker source code:
+The dashboard bundles are generated from the same Worker source used by Wrangler. Do not edit them by hand. To regenerate them after changing Worker source code:
 
 ```bash
 npm install
 npm run worker:bundle-dashboard
 ```
 
-CI checks that [worker/single-file.js](worker/single-file.js) stays in sync with `worker/src/`.
+CI checks that [worker/single-file/](worker/single-file/) stays in sync with `worker/src/`.
+
+Available dashboard bundles:
+
+- [worker/single-file/full.js](worker/single-file/full.js): all endpoints.
+- [worker/single-file/wss-only.js](worker/single-file/wss-only.js): encrypted WSS tunnel only.
+- [worker/single-file/direct-connect.js](worker/single-file/direct-connect.js): static-bearer TCP direct endpoint only.
+- [worker/single-file/url-full.js](worker/single-file/url-full.js): static-bearer URL ingress with TCP connect and fetch egress.
+
+To generate an ad hoc single-file Worker elsewhere, use a build profile:
+
+```bash
+npm run worker:bundle -- --profile wss-only --outfile .local/worker/wss-only.js
+npm run worker:bundle -- --profile direct-connect --outfile .local/worker/direct-connect.js
+npm run worker:bundle -- --profile url-full --outfile .local/worker/url-full.js
+```
+
+Available profiles are `full`, `wss-only`, `direct-connect`, and `url-full`.
 
 ### Option B: Wrangler
 
@@ -200,6 +217,32 @@ printf 'GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n' \
       -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
       --data-binary @- \
       https://<your-worker-host>/direct/httpforever.com/80
+```
+
+The URL Direct endpoint chooses the egress from the target URL scheme. `tcp://` uses Worker TCP sockets, while `http://` and `https://` use Worker `fetch()`:
+
+```bash
+printf 'GET / HTTP/1.1\r\nHost: httpforever.com\r\nConnection: close\r\n\r\n' \
+  | curl --http2 --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+      --data-binary @- \
+      'https://<your-worker-host>/direct-url?target=tcp://httpforever.com:80'
+
+curl --http2 --no-buffer \
+  -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+  'https://<your-worker-host>/direct-url?target=https://example.com/'
+```
+
+For `tcp://` targets, `tls=on` makes the Worker establish TLS to the target and relay plaintext payload bytes over that TLS connection. The default is `tls=off`; `starttls` is not exposed because it requires protocol-specific timing inside the byte stream.
+
+```bash
+printf 'GET / HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n' \
+  | curl --http2 --no-buffer \
+      -X POST \
+      -H "Authorization: Bearer $CF_SOCKS_DIRECT_BEARER" \
+      --data-binary @- \
+      'https://<your-worker-host>/direct-url?target=tcp://www.google.com:443&tls=on'
 ```
 
 For server-first protocols such as SSH banners:
@@ -316,11 +359,13 @@ resp, err := pool.Do(ctx, "tcp", "httpforever.com:80", payload)
 
 WSS `Dial` returns a `net.Conn`. Read deadlines are recoverable local wait timeouts. Write deadlines are checked before a WebSocket message write begins; once a write has started, use `Close()` to abandon the connection. Closing WSS also closes the Worker-side target TCP connection, so the same TCP session cannot be resumed by reconnecting.
 
+Target TLS is explicit. `Client{TargetTLS: cfsocks.TLSOn}` applies Worker-to-target TLS to SDK `Dial` and `Do`, and `Client.Do(..., cfsocks.WithTLS(cfsocks.TLSOn))` overrides it per bounded payload call. Keep this off for normal SOCKS-style HTTPS tunneling, where the original client performs TLS inside the TCP stream.
+
 ## Security
 
 The Worker is not an open proxy. Clients authenticate with an encrypted bearer token derived from `AUTH_SECRET` before the Worker opens any outbound TCP connection.
 
-The Direct endpoint is disabled unless `DIRECT_BEARER` is configured. Treat it as a long-lived API key and rotate it if it is exposed.
+The Direct endpoints are disabled unless `DIRECT_BEARER` is configured. Treat it as a long-lived API key and rotate it if it is exposed.
 
 Do not commit real secrets. Use Wrangler secrets, Cloudflare environment variables, or local shell environment variables.
 

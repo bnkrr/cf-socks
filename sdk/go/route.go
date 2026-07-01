@@ -44,6 +44,17 @@ func (c *Client) buildRoute(network, address string, spec routeSpec) (routePlan,
 		return routePlan{}, err
 	}
 	claims := token.Claims{Op: spec.op, Host: host, Port: port}
+	targetTLS := c.TargetTLS
+	if spec.options.TargetTLS != nil {
+		targetTLS = *spec.options.TargetTLS
+	}
+	targetTLS, err = ParseTLSMode(string(targetTLS))
+	if err != nil {
+		return routePlan{}, err
+	}
+	if targetTLS != TLSOff {
+		claims.SecureTransport = string(targetTLS)
+	}
 	if spec.options.WriteCloseAfter != nil {
 		ms := spec.options.WriteCloseAfter.Milliseconds()
 		claims.WriteCloseAfterMS = &ms

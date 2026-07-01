@@ -1,8 +1,6 @@
-import { connect } from "cloudflare:sockets";
-import { PayloadOptions, Target } from "./route";
-
-type WorkerSocket = ReturnType<typeof connect>;
-type ConnectMode = "wss" | "payload";
+import { connectTarget } from "../egress/connect";
+import type { WorkerSocket } from "../egress/connect";
+import type { PayloadOptions, Target } from "../shared/types";
 
 interface WebSocketByteSession {
   send(data: string | Uint8Array): void;
@@ -11,10 +9,10 @@ interface WebSocketByteSession {
   onClose(handler: () => void): void;
 }
 
-export async function runWssTunnel(ws: WebSocket, target: Target): Promise<void> {
+export async function runWssTunnel(ws: WebSocket, target: Target, options: PayloadOptions = {}): Promise<void> {
   let socket: WorkerSocket;
   try {
-    socket = await connectTarget(target, "wss");
+    socket = await connectTarget(target, "wss", options);
   } catch {
     safeSend(ws, "ERR connect_failed\n");
     ws.close(1011);
@@ -25,42 +23,6 @@ export async function runWssTunnel(ws: WebSocket, target: Target): Promise<void>
   const relayDone = relayWebSocketToSocket(session, socket);
   session.send("OK\n");
   await relayDone;
-}
-
-export async function runPayloadExchange(
-  request: Request,
-  target: Target,
-  ctx: ExecutionContext,
-  options: PayloadOptions = {},
-): Promise<Response | null> {
-  let socket: WorkerSocket;
-  try {
-    socket = await connectTarget(target, "payload");
-  } catch {
-    return null;
-  }
-
-  ctx.waitUntil(
-    pipeRequestToSocket(request, socket, options).catch(() => {
-      void socket.close().catch(() => undefined);
-    }),
-  );
-  return new Response(socket.readable, {
-    status: 200,
-    headers: {
-      "content-type": "application/octet-stream",
-      "cache-control": "no-store",
-    },
-  });
-}
-
-async function connectTarget(target: Target, mode: ConnectMode): Promise<WorkerSocket> {
-  const socket =
-    mode === "payload"
-      ? connect({ hostname: target.host, port: target.port }, { secureTransport: "off", allowHalfOpen: true })
-      : connect({ hostname: target.host, port: target.port });
-  await socket.opened;
-  return socket;
 }
 
 function createWebSocketByteSession(ws: WebSocket): WebSocketByteSession {
@@ -143,40 +105,6 @@ async function binaryMessageBytes(data: unknown): Promise<Uint8Array> {
     return new Uint8Array(await data.arrayBuffer());
   }
   throw new TypeError("unsupported binary message");
-}
-
-async function pipeRequestToSocket(request: Request, socket: WorkerSocket, options: PayloadOptions): Promise<void> {
-  const writer = socket.writable.getWriter();
-  try {
-    if (request.body) {
-      const reader = request.body.getReader();
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) {
-            break;
-          }
-          if (value) {
-            await writer.write(value);
-          }
-        }
-      } finally {
-        reader.releaseLock();
-      }
-    }
-    if (options.writeCloseAfterMs !== undefined) {
-      if (options.writeCloseAfterMs > 0) {
-        await sleep(options.writeCloseAfterMs);
-      }
-      await writer.close();
-    }
-  } finally {
-    writer.releaseLock();
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function safeSend(ws: WebSocket, data: string | Uint8Array): void {
