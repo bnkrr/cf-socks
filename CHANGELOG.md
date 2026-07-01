@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.7.0
+
+### Added
+
+- Added profile-based Worker bundles for dashboard deployment: `full`, `wss-only`, `direct-connect`, and `url-full`.
+- Added `/direct-url?target=...` static-bearer URL ingress for curl-friendly TCP connect and `fetch()` egress checks.
+- Added Worker-to-target TLS control with `tls=on` for Direct URL TCP targets and `TLSOn` / `WithTLS` in the Go SDK.
+- Added Direct URL E2E coverage for TCP HTTP, fetch, TLS-to-target HTTP, and H3 direct flows.
+
+### Changed
+
+- Refactored Worker internals around separate auth, ingress, egress, profile, and response modules.
+- Replaced the single dashboard bundle with profile-specific generated bundles and release assets.
+- Updated README and protocol docs around Direct URL, target TLS, generated bundles, and profile selection.
+
+### Compatibility
+
+- Existing WSS, H2/H3, SOCKS, HTTP CONNECT, Go SDK, and `/direct/:host/:port` flows remain available in the `full` Worker profile.
+- Dashboard users should copy `worker/single-file/full.js` for the full feature set instead of the removed `worker/single-file.js`.
+- Target TLS is opt-in; normal SOCKS-style HTTPS tunneling should leave it off so the original client performs TLS inside the TCP stream.
+
 ## v0.6.0
 
 ### Added
